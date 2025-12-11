@@ -54,7 +54,8 @@ func main() {
 	}
 
 	if len(args) < 1 {
-		printHelp()
+		// Default: langsung masuk chat mode
+		runChat([]string{})
 		return
 	}
 
