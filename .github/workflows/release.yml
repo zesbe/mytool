@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build binaries
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          mkdir -p dist
+
+          # Build settings
+          LDFLAGS="-s -w -X main.version=${VERSION} -X main.buildTime=$(date -u '+%Y-%m-%d_%H:%M:%S') -X main.gitCommit=${GITHUB_SHA::7}"
+
+          echo "Building mytool v${VERSION}..."
+
+          # Linux AMD64
+          echo "  → Linux AMD64"
+          GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o dist/mytool-linux-amd64 .
+
+          # Linux ARM64
+          echo "  → Linux ARM64"
+          GOOS=linux GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o dist/mytool-linux-arm64 .
+
+          # macOS AMD64
+          echo "  → macOS AMD64"
+          GOOS=darwin GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o dist/mytool-darwin-amd64 .
+
+          # macOS ARM64
+          echo "  → macOS ARM64"
+          GOOS=darwin GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o dist/mytool-darwin-arm64 .
+
+          # Windows AMD64
+          echo "  → Windows AMD64"
+          GOOS=windows GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o dist/mytool-windows-amd64.exe .
+
+          # Generate checksums
+          echo "Generating checksums..."
+          cd dist
+          for f in *; do
+            sha256sum "$f" > "$f.sha256"
+          done
+
+          ls -la
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: mytool v${{ steps.version.outputs.VERSION }}
+          body: |
+            ## Installation
+
+            **Linux/macOS:**
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/zesbe/mytool/main/install.sh | sh
+            ```
+
+            **Windows (PowerShell):**
+            ```powershell
+            irm https://raw.githubusercontent.com/zesbe/mytool/main/install.ps1 | iex
+            ```
+
+            ## Checksums
+            SHA256 checksums are provided for each binary.
+          files: |
+            dist/*
+          draft: false
+          prerelease: false
