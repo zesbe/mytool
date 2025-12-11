@@ -511,46 +511,49 @@ func saveSettings() {
 }
 
 func showSettings(scanner *bufio.Scanner) {
+	fmt.Printf("\n%s=== Settings ===%s\n", colorCyan, colorReset)
+	
+	fmt.Printf("\n%sModel & Reasoning%s\n", colorYellow, colorReset)
+	fmt.Printf("  1. Model: %s%s%s\n", colorGreen, settings.Model, colorReset)
+	fmt.Printf("  2. Reasoning level: %s\n", settings.ReasoningLevel)
+	
+	fmt.Printf("\n%sPreferences%s\n", colorYellow, colorReset)
+	fmt.Printf("  3. Diff display mode: %s\n", settings.DiffDisplayMode)
+	fmt.Printf("  4. Todo display mode: %s\n", settings.TodoDisplayMode)
+	fmt.Printf("  5. Cloud session sync: %s\n", boolToOnOff(settings.CloudSync))
+	fmt.Printf("  6. Show thinking: %s\n", boolToOnOff(settings.ShowThinking))
+	
+	fmt.Printf("\n%sSounds%s\n", colorYellow, colorReset)
+	fmt.Printf("  7. Play sounds: %s\n", boolToOnOff(settings.PlaySounds))
+	
+	fmt.Printf("\n%sExperimental%s\n", colorYellow, colorReset)
+	fmt.Printf("  8. Allow Background: %s\n", boolToOnOff(settings.AllowBackground))
+	fmt.Printf("  9. Custom Droids: %s\n", boolToOnOff(settings.CustomDroids))
+	
+	fmt.Printf("\n%sEnter number to toggle, 'q' to exit%s\n", colorGray, colorReset)
+	
 	for {
-		fmt.Print("\033[H\033[2J") // Clear screen
-		fmt.Printf("%s┌─────────────────────────────────────┐%s\n", colorCyan, colorReset)
-		fmt.Printf("%s│           Settings                  │%s\n", colorCyan, colorReset)
-		fmt.Printf("%s└─────────────────────────────────────┘%s\n", colorCyan, colorReset)
-		
-		fmt.Printf("\n%sModel & Reasoning%s\n", colorYellow, colorReset)
-		fmt.Printf("  1. Model: %s%s%s\n", colorGreen, settings.Model, colorReset)
-		fmt.Printf("  2. Reasoning level: %s\n", settings.ReasoningLevel)
-		
-		fmt.Printf("\n%sPreferences%s\n", colorYellow, colorReset)
-		fmt.Printf("  3. Diff display mode: %s\n", settings.DiffDisplayMode)
-		fmt.Printf("  4. Todo display mode: %s\n", settings.TodoDisplayMode)
-		fmt.Printf("  5. Cloud session sync: %s\n", boolToOnOff(settings.CloudSync))
-		fmt.Printf("  6. Show thinking: %s\n", boolToOnOff(settings.ShowThinking))
-		
-		fmt.Printf("\n%sSounds%s\n", colorYellow, colorReset)
-		fmt.Printf("  7. Play sounds: %s\n", boolToOnOff(settings.PlaySounds))
-		fmt.Printf("  8. Completion sound: %s\n", settings.CompletionSound)
-		
-		fmt.Printf("\n%sExperimental%s\n", colorYellow, colorReset)
-		fmt.Printf("  9. Allow Background Processes: %s\n", boolToOnOff(settings.AllowBackground))
-		fmt.Printf("  10. Custom Droids: %s\n", boolToOnOff(settings.CustomDroids))
-		
-		fmt.Printf("\n%sPress number to toggle, 'q' to exit%s\n", colorGray, colorReset)
-		fmt.Printf("> ")
+		fmt.Printf("%ssettings>%s ", colorCyan, colorReset)
 		
 		if !scanner.Scan() {
-			break
+			return
 		}
 		input := strings.TrimSpace(scanner.Text())
 		
+		if input == "" {
+			continue
+		}
+		
 		switch input {
-		case "q", "Q", "exit":
+		case "q", "Q", "exit", "back":
 			saveSettings()
+			fmt.Printf("%s← Back to chat%s\n", colorGray, colorReset)
 			return
 		case "1":
 			fmt.Printf("Enter model name: ")
 			if scanner.Scan() {
 				settings.Model = strings.TrimSpace(scanner.Text())
+				fmt.Printf("%s✓ Model: %s%s\n", colorGreen, settings.Model, colorReset)
 			}
 		case "2":
 			if settings.ReasoningLevel == "High" {
@@ -560,31 +563,48 @@ func showSettings(scanner *bufio.Scanner) {
 			} else {
 				settings.ReasoningLevel = "High"
 			}
+			fmt.Printf("%s✓ Reasoning: %s%s\n", colorGreen, settings.ReasoningLevel, colorReset)
 		case "3":
 			if settings.DiffDisplayMode == "GitHub" {
 				settings.DiffDisplayMode = "Unified"
 			} else {
 				settings.DiffDisplayMode = "GitHub"
 			}
+			fmt.Printf("%s✓ Diff mode: %s%s\n", colorGreen, settings.DiffDisplayMode, colorReset)
 		case "4":
 			if settings.TodoDisplayMode == "In message flow" {
 				settings.TodoDisplayMode = "Sidebar"
 			} else {
 				settings.TodoDisplayMode = "In message flow"
 			}
+			fmt.Printf("%s✓ Todo mode: %s%s\n", colorGreen, settings.TodoDisplayMode, colorReset)
 		case "5":
 			settings.CloudSync = !settings.CloudSync
+			fmt.Printf("%s✓ Cloud sync: %s%s\n", colorGreen, boolToStr(settings.CloudSync), colorReset)
 		case "6":
 			settings.ShowThinking = !settings.ShowThinking
+			fmt.Printf("%s✓ Show thinking: %s%s\n", colorGreen, boolToStr(settings.ShowThinking), colorReset)
 		case "7":
 			settings.PlaySounds = !settings.PlaySounds
-		case "9":
+			fmt.Printf("%s✓ Play sounds: %s%s\n", colorGreen, boolToStr(settings.PlaySounds), colorReset)
+		case "8":
 			settings.AllowBackground = !settings.AllowBackground
-		case "10":
+			fmt.Printf("%s✓ Allow background: %s%s\n", colorGreen, boolToStr(settings.AllowBackground), colorReset)
+		case "9":
 			settings.CustomDroids = !settings.CustomDroids
+			fmt.Printf("%s✓ Custom droids: %s%s\n", colorGreen, boolToStr(settings.CustomDroids), colorReset)
+		default:
+			fmt.Printf("%sUnknown option. Type 'q' to exit.%s\n", colorRed, colorReset)
 		}
 		saveSettings()
 	}
+}
+
+func boolToStr(b bool) string {
+	if b {
+		return "On"
+	}
+	return "Off"
 }
 
 func boolToOnOff(b bool) string {
@@ -618,71 +638,94 @@ func saveMCPServers() {
 }
 
 func showMCPServers(scanner *bufio.Scanner) {
-	for {
-		fmt.Print("\033[H\033[2J")
-		fmt.Printf("%s┌─────────────────────────────────────┐%s\n", colorCyan, colorReset)
-		fmt.Printf("%s│       Manage MCP servers            │%s\n", colorCyan, colorReset)
-		fmt.Printf("%s└─────────────────────────────────────┘%s\n", colorCyan, colorReset)
-		
-		for i, server := range mcpServers {
-			status := fmt.Sprintf("%s(disconnected)%s", colorRed, colorReset)
-			if server.Connected {
-				status = fmt.Sprintf("%s(connected)%s", colorGreen, colorReset)
-			}
-			fmt.Printf("  %d. %s %s\n", i+1, server.Name, status)
+	fmt.Printf("\n%s=== MCP Servers ===%s\n\n", colorCyan, colorReset)
+	
+	for i, server := range mcpServers {
+		status := fmt.Sprintf("%s(disconnected)%s", colorRed, colorReset)
+		if server.Connected {
+			status = fmt.Sprintf("%s(connected)%s", colorGreen, colorReset)
 		}
-		
-		fmt.Printf("\n  %s+%s Add MCP server from registry\n", colorGreen, colorReset)
-		fmt.Printf("  %s+%s Add MCP server manually\n", colorGreen, colorReset)
-		
-		fmt.Printf("\n%sEnter number to toggle, 'a' to add, 'd' to delete, 'q' to exit%s\n", colorGray, colorReset)
-		fmt.Printf("> ")
+		fmt.Printf("  %d. %s %s\n", i+1, server.Name, status)
+	}
+	
+	fmt.Printf("\n%sCommands:%s\n", colorYellow, colorReset)
+	fmt.Println("  [1-9]     Toggle connection")
+	fmt.Println("  a         Add new server")
+	fmt.Println("  d [num]   Delete server (e.g. d 1)")
+	fmt.Println("  q         Back to chat")
+	
+	for {
+		fmt.Printf("\n%smcp>%s ", colorCyan, colorReset)
 		
 		if !scanner.Scan() {
-			break
+			return
 		}
 		input := strings.TrimSpace(scanner.Text())
 		
-		if input == "q" || input == "Q" {
+		if input == "" {
+			continue
+		}
+		
+		if input == "q" || input == "Q" || input == "exit" || input == "back" {
+			fmt.Printf("%s← Back to chat%s\n", colorGray, colorReset)
 			return
 		}
 		
-		if input == "a" || input == "A" {
+		if input == "a" || input == "A" || input == "add" {
 			fmt.Printf("Server name: ")
 			if !scanner.Scan() {
-				continue
+				return
 			}
 			name := strings.TrimSpace(scanner.Text())
-			
-			fmt.Printf("Server URL: ")
-			if !scanner.Scan() {
+			if name == "" {
+				fmt.Println("Cancelled")
 				continue
 			}
+			
+			fmt.Printf("Server URL (e.g. localhost:3000): ")
+			if !scanner.Scan() {
+				return
+			}
 			url := strings.TrimSpace(scanner.Text())
+			if url == "" {
+				fmt.Println("Cancelled")
+				continue
+			}
+			
+			fmt.Printf("Tools (comma separated, e.g. browse,click,type): ")
+			if !scanner.Scan() {
+				return
+			}
+			toolsStr := strings.TrimSpace(scanner.Text())
+			var tools []string
+			if toolsStr != "" {
+				tools = strings.Split(toolsStr, ",")
+				for i := range tools {
+					tools[i] = strings.TrimSpace(tools[i])
+				}
+			}
 			
 			mcpServers = append(mcpServers, MCPServer{
 				Name:      name,
 				URL:       url,
 				Type:      "custom",
 				Connected: false,
-				Tools:     []string{},
+				Tools:     tools,
 			})
 			saveMCPServers()
-			fmt.Printf("%s✓ Added: %s%s\n", colorGreen, name, colorReset)
-			time.Sleep(time.Second)
+			fmt.Printf("%s✓ Added: %s (%s)%s\n", colorGreen, name, url, colorReset)
 			continue
 		}
 		
-		if strings.HasPrefix(input, "d") {
-			parts := strings.Fields(input)
-			if len(parts) > 1 {
-				if idx := parseInt(parts[1]) - 1; idx >= 0 && idx < len(mcpServers) {
-					name := mcpServers[idx].Name
-					mcpServers = append(mcpServers[:idx], mcpServers[idx+1:]...)
-					saveMCPServers()
-					fmt.Printf("%s✓ Removed: %s%s\n", colorRed, name, colorReset)
-					time.Sleep(time.Second)
-				}
+		if strings.HasPrefix(input, "d ") || strings.HasPrefix(input, "d") && len(input) > 1 {
+			numStr := strings.TrimPrefix(strings.TrimPrefix(input, "d "), "d")
+			if idx := parseInt(numStr) - 1; idx >= 0 && idx < len(mcpServers) {
+				name := mcpServers[idx].Name
+				mcpServers = append(mcpServers[:idx], mcpServers[idx+1:]...)
+				saveMCPServers()
+				fmt.Printf("%s✓ Removed: %s%s\n", colorGreen, name, colorReset)
+			} else {
+				fmt.Printf("%sInvalid number%s\n", colorRed, colorReset)
 			}
 			continue
 		}
@@ -696,7 +739,8 @@ func showMCPServers(scanner *bufio.Scanner) {
 			}
 			saveMCPServers()
 			fmt.Printf("%s✓ %s: %s%s\n", colorGreen, mcpServers[idx].Name, status, colorReset)
-			time.Sleep(500 * time.Millisecond)
+		} else if input != "" {
+			fmt.Printf("%sUnknown command. Type 'q' to exit.%s\n", colorRed, colorReset)
 		}
 	}
 }
