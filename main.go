@@ -274,20 +274,52 @@ type ChatResponse struct {
 	} `json:"error,omitempty"`
 }
 
+func getAPIKey() string {
+	// 1. Check environment variable first
+	if key := os.Getenv("MINIMAX_API_KEY"); key != "" {
+		return key
+	}
+
+	// 2. Check config file ~/.mytool_key
+	home, _ := os.UserHomeDir()
+	configFile := home + "/.mytool_key"
+	if data, err := os.ReadFile(configFile); err == nil {
+		return strings.TrimSpace(string(data))
+	}
+
+	return ""
+}
+
+func saveAPIKey(key string) error {
+	home, _ := os.UserHomeDir()
+	configFile := home + "/.mytool_key"
+	return os.WriteFile(configFile, []byte(key), 0600)
+}
+
 func runChat(args []string) {
-	apiKey := os.Getenv("MINIMAX_API_KEY")
+	apiKey := getAPIKey()
 	if apiKey == "" {
-		fmt.Printf("%sError: MINIMAX_API_KEY environment variable not set%s\n", colorRed, colorReset)
+		fmt.Printf("\n%smytool%s - Setup\n\n", colorGreen, colorReset)
+		fmt.Println("API key belum di-set. Dapatkan di: https://platform.minimax.io/")
 		fmt.Println()
-		fmt.Println("To get an API key:")
-		fmt.Println("  1. Go to https://platform.minimax.io/")
-		fmt.Println("  2. Create an account or sign in")
-		fmt.Println("  3. Go to API Keys and create a new key")
-		fmt.Println()
-		fmt.Println("Then set the key:")
-		fmt.Printf("  export MINIMAX_API_KEY=\"your-api-key\"\n")
-		fmt.Println()
-		os.Exit(1)
+		fmt.Printf("Masukkan API Key: ")
+		
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			apiKey = strings.TrimSpace(scanner.Text())
+			if apiKey != "" {
+				if err := saveAPIKey(apiKey); err != nil {
+					fmt.Printf("%sGagal menyimpan: %s%s\n", colorRed, err, colorReset)
+				} else {
+					fmt.Printf("%sAPI key tersimpan di ~/.mytool_key%s\n\n", colorGreen, colorReset)
+				}
+			}
+		}
+		
+		if apiKey == "" {
+			fmt.Printf("%sAPI key tidak boleh kosong%s\n", colorRed, colorReset)
+			os.Exit(1)
+		}
 	}
 
 	// If message provided as argument, send single message with streaming
@@ -304,9 +336,7 @@ func runChat(args []string) {
 	}
 
 	// Interactive mode
-	fmt.Printf("%s╭─────────────────────────────────────╮%s\n", colorCyan, colorReset)
-	fmt.Printf("%s│  %smytool%s - AI Assistant              %s│%s\n", colorCyan, colorGreen, colorReset, colorCyan, colorReset)
-	fmt.Printf("%s╰─────────────────────────────────────╯%s\n", colorCyan, colorReset)
+	fmt.Printf("\n%smytool%s - AI Assistant\n", colorGreen, colorReset)
 	fmt.Printf("%sKetik pertanyaan, 'exit' untuk keluar%s\n\n", colorGray, colorReset)
 
 	var history []ChatMessage
