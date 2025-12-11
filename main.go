@@ -352,6 +352,66 @@ func formatSize(size int64) string {
 	return fmt.Sprintf("%.1f%cB", float64(size)/float64(div), "KMGTPE"[exp])
 }
 
+// Parse and execute tool calls from AI response
+func parseAndExecuteTools(response string) (string, []string) {
+	var toolResults []string
+	
+	// Find all <tool>...</tool> patterns
+	for {
+		startIdx := strings.Index(response, "<tool>")
+		if startIdx == -1 {
+			break
+		}
+		endIdx := strings.Index(response[startIdx:], "</tool>")
+		if endIdx == -1 {
+			break
+		}
+		endIdx += startIdx
+		
+		toolCall := response[startIdx+6 : endIdx]
+		parts := strings.SplitN(toolCall, ":", 2)
+		if len(parts) < 2 {
+			parts = append(parts, "")
+		}
+		
+		toolName := strings.TrimSpace(parts[0])
+		toolArg := strings.TrimSpace(parts[1])
+		
+		var result string
+		switch toolName {
+		case "read":
+			result = cmdRead(toolArg)
+		case "ls":
+			result = cmdList(toolArg)
+		case "run":
+			result = cmdRun(toolArg)
+		case "write":
+			// Handle write with content
+			result = cmdWriteFile(toolArg, "")
+		default:
+			result = fmt.Sprintf("Unknown tool: %s", toolName)
+		}
+		
+		toolResults = append(toolResults, fmt.Sprintf("[%s:%s]\n%s", toolName, toolArg, result))
+		
+		// Remove the tool tag from response for display
+		response = response[:startIdx] + response[endIdx+7:]
+	}
+	
+	return strings.TrimSpace(response), toolResults
+}
+
+func cmdWriteFile(path string, content string) string {
+	if path == "" {
+		return "Error: path required"
+	}
+	fullPath := resolvePath(path)
+	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	return fmt.Sprintf("File written: %s", fullPath)
+}
+
 // ==================== CHAT ====================
 
 func getAPIKey() string {
@@ -372,22 +432,39 @@ func saveAPIKey(key string) error {
 
 func getSystemPrompt() string {
 	hostname, _ := os.Hostname()
-	return fmt.Sprintf(`Kamu adalah mytool, AI assistant yang berjalan di terminal dengan akses ke sistem.
+	return fmt.Sprintf(`Kamu adalah mytool, AI assistant yang berjalan di terminal dengan akses penuh ke sistem.
 
 Info Sistem:
 - Hostname: %s
-- OS: %s/%s
+- OS: %s/%s  
 - User: %s
 - Working Directory: %s
 
-Kamu bisa membantu user dengan:
-- Menjawab pertanyaan programming dan teknis
-- Menjelaskan kode dan konsep
-- Membantu debugging
-- Memberikan saran untuk file dan direktori
+TOOLS YANG TERSEDIA:
+Kamu bisa menggunakan tools dengan format <tool>nama:argumen</tool>
 
-User bisa menggunakan command seperti /read, /ls, /edit, /run untuk operasi file.
-Berikan respons yang ringkas dan helpful dalam Bahasa Indonesia jika user berbicara Indonesia.`, 
+1. <tool>read:path/to/file</tool> - Baca isi file
+2. <tool>ls:path/to/dir</tool> - List direktori (kosongkan untuk current dir)
+3. <tool>run:command</tool> - Jalankan shell command
+4. <tool>write:path/to/file</tool> - Tulis file (konten di baris berikutnya sampai </tool>)
+
+CONTOH PENGGUNAAN:
+- User: "cek isi file config.json"
+  Kamu: <tool>read:config.json</tool>
+  
+- User: "list folder src"
+  Kamu: <tool>ls:src</tool>
+
+- User: "jalankan npm install"
+  Kamu: <tool>run:npm install</tool>
+
+ATURAN:
+1. Jika user minta lihat/baca file, LANGSUNG gunakan <tool>read:path</tool>
+2. Jika user minta list folder, LANGSUNG gunakan <tool>ls:path</tool>  
+3. Jika user minta jalankan command, LANGSUNG gunakan <tool>run:command</tool>
+4. Setelah tool dieksekusi, kamu akan mendapat hasilnya dan bisa menjelaskan ke user
+5. Berikan respons ringkas dalam Bahasa Indonesia jika user berbicara Indonesia
+6. JANGAN suruh user menjalankan command sendiri - KAMU yang menjalankannya!`, 
 		hostname, runtime.GOOS, runtime.GOARCH, os.Getenv("USER"), currentDir)
 }
 
@@ -481,10 +558,37 @@ func runChat(args []string) {
 		if err != nil {
 			fmt.Printf("\n%sError: %s%s\n", colorRed, err, colorReset)
 			history = history[:len(history)-1]
+			continue
+		}
+		
+		// Check for tool calls in response
+		_, toolResults := parseAndExecuteTools(response)
+		
+		if len(toolResults) > 0 {
+			// Show tool execution
+			fmt.Printf("\n\n%s--- Executing tools ---%s\n", colorCyan, colorReset)
+			for _, result := range toolResults {
+				fmt.Printf("%s%s%s\n", colorGray, result, colorReset)
+			}
+			fmt.Printf("%s-----------------------%s\n\n", colorCyan, colorReset)
+			
+			// Add tool results to history and get AI explanation
+			history = append(history, ChatMessage{Role: "assistant", Content: response})
+			toolContext := "Tool results:\n" + strings.Join(toolResults, "\n\n")
+			history = append(history, ChatMessage{Role: "user", Content: toolContext + "\n\nBerdasarkan hasil di atas, jelaskan ke user dengan ringkas."})
+			
+			fmt.Printf("%s", colorGreen)
+			followUp, err := sendMessageStream(apiKey, history)
+			fmt.Printf("%s", colorReset)
+			
+			if err == nil {
+				history = append(history, ChatMessage{Role: "assistant", Content: followUp})
+			}
 		} else {
-			fmt.Printf("\n\n")
 			history = append(history, ChatMessage{Role: "assistant", Content: response})
 		}
+		
+		fmt.Printf("\n\n")
 	}
 }
 
