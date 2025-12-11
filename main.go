@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,7 +25,7 @@ import (
 )
 
 var (
-	version   = "3.1.0"
+	version   = "3.3.0"
 	buildTime = time.Now().Format("2006-01-02")
 )
 
@@ -71,6 +73,12 @@ var (
 	memory          = make(map[string]string)
 	chatExportFile  string
 	settings        Settings
+	
+	// Concurrent chat
+	isStreaming     bool
+	streamCancel    chan struct{}
+	inputQueue      chan string
+	streamMutex     sync.Mutex
 	mcpServers      []MCPServer
 )
 
@@ -1671,31 +1679,83 @@ func runChatWithHistory(history []ChatMessage) {
 	
 	printBanner()
 	fmt.Printf("\n%sYou are standing in an open terminal. An AI awaits your commands.%s\n", colorGray, colorReset)
-	fmt.Printf("\nENTER send • \\ newline • @file include • /help commands • Ctrl+C exit\n")
+	fmt.Printf("\n%sENTER%s send • %sCtrl+C%s cancel/exit • %s@file%s include • %s/help%s commands\n", 
+		colorYellow, colorReset, colorYellow, colorReset, colorYellow, colorReset, colorYellow, colorReset)
 	printStatusBar()
 	fmt.Println()
 
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 2*1024*1024), 2*1024*1024)
+	// Initialize concurrent channels
+	inputQueue = make(chan string, 10)
+	streamCancel = make(chan struct{})
+	
+	// Input reader goroutine
+	inputChan := make(chan string)
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Buffer(make([]byte, 2*1024*1024), 2*1024*1024)
+		for {
+			if scanner.Scan() {
+				inputChan <- scanner.Text()
+			} else {
+				close(inputChan)
+				return
+			}
+		}
+	}()
+
+	// Handle Ctrl+C for cancel
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt)
+	go func() {
+		for range sigChan {
+			streamMutex.Lock()
+			streaming := isStreaming
+			streamMutex.Unlock()
+			
+			if streaming {
+				// Cancel current stream
+				close(streamCancel)
+				streamCancel = make(chan struct{})
+				fmt.Printf("\n%s⚡ Cancelled%s\n", colorYellow, colorReset)
+			} else {
+				// Exit
+				saveMemory()
+				fmt.Printf("\n%s👋 Bye!%s\n", colorCyan, colorReset)
+				os.Exit(0)
+			}
+		}
+	}()
 
 	hints := []string{
 		"\"What's in this folder?\"",
 		"\"Read and explain package.json\"",
 		"\"Find all TODO comments\"",
-		"\"Create a Python hello world\"",
-		"\"Search how to parse JSON in Go\"",
 	}
 	hintIdx := 0
+	var pendingInput string
+	var inputBuffer strings.Builder
 
-	for {
-		hint := hints[hintIdx%len(hints)]
-		fmt.Printf("%s❯%s %s%s%s", getModeColor(), colorReset, colorGray, hint, colorReset)
-		fmt.Printf("\r%s❯%s ", getModeColor(), colorReset)
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 2*1024*1024), 2*1024*1024)
+
+	showPrompt := func() {
+		streamMutex.Lock()
+		streaming := isStreaming
+		streamMutex.Unlock()
 		
-		input := readMultiLine(scanner)
+		if streaming {
+			fmt.Printf("\r%s⏳%s ", colorYellow, colorReset)
+		} else {
+			hint := hints[hintIdx%len(hints)]
+			fmt.Printf("%s❯%s %s%s%s", getModeColor(), colorReset, colorGray, hint, colorReset)
+			fmt.Printf("\r%s❯%s ", getModeColor(), colorReset)
+		}
+	}
+
+	processInput := func(input string) {
 		input = strings.TrimSpace(input)
 		if input == "" {
-			continue
+			return
 		}
 		hintIdx++
 		
@@ -1706,37 +1766,57 @@ func runChatWithHistory(history []ChatMessage) {
 		case input == "exit" || input == "quit":
 			saveMemory()
 			fmt.Printf("%s👋 Bye!%s\n", colorCyan, colorReset)
+			os.Exit(0)
+		case input == "/cancel":
+			streamMutex.Lock()
+			if isStreaming {
+				close(streamCancel)
+				streamCancel = make(chan struct{})
+				fmt.Printf("%s⚡ Cancelled%s\n", colorYellow, colorReset)
+			}
+			streamMutex.Unlock()
 			return
 		case input == "/mode":
 			cycleMode()
 			history[0] = ChatMessage{Role: "system", Content: getSystemPrompt()}
 			fmt.Printf("Mode: %s\n\n", getModeDisplay())
-			continue
+			return
 		case input == "/undo":
 			fmt.Println(doUndo())
 			fmt.Println()
-			continue
+			return
 		case input == "/save":
 			saveSession(history)
-			continue
+			return
 		case input == "/copy":
 			fmt.Println(copyToClipboard(lastResponse))
-			continue
+			return
 		case input == "/cost":
 			fmt.Printf("Tokens: %d | Cost: $%.4f\n\n", totalTokens, totalCost)
-			continue
+			return
 		case input == "/context":
 			pct := float64(totalTokens) / float64(maxContextTokens) * 100
 			fmt.Printf("Context: %d/%d (%.1f%%)\n\n", totalTokens, maxContextTokens, pct)
-			continue
+			return
 		case input == "/memory":
 			showMemory()
 			fmt.Println()
-			continue
+			return
 		case input == "/sessions":
 			listSessions()
 			fmt.Println()
-			continue
+			return
+		case input == "/queue":
+			streamMutex.Lock()
+			qLen := len(inputQueue)
+			streaming := isStreaming
+			streamMutex.Unlock()
+			if streaming {
+				fmt.Printf("Queue: %d messages pending\n", qLen)
+			} else {
+				fmt.Println("Not streaming")
+			}
+			return
 		case strings.HasPrefix(input, "/export"):
 			parts := strings.SplitN(input, " ", 2)
 			f := ""
@@ -1744,53 +1824,82 @@ func runChatWithHistory(history []ChatMessage) {
 				f = parts[1]
 			}
 			exportChat(f)
-			continue
+			return
 		case strings.HasPrefix(input, "/forget "):
 			key := strings.TrimPrefix(input, "/forget ")
 			forgetFact(key)
 			fmt.Printf("Forgot: %s\n\n", key)
-			continue
+			return
 		case strings.HasPrefix(input, "/remember "):
 			parts := strings.SplitN(strings.TrimPrefix(input, "/remember "), "=", 2)
 			if len(parts) == 2 {
 				rememberFact(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
 				fmt.Printf("Remembered: %s\n\n", parts[0])
 			}
-			continue
+			return
 		case strings.HasPrefix(input, "/python "):
 			code := strings.TrimPrefix(input, "/python ")
 			fmt.Println(runPython(code))
-			continue
+			return
 		case strings.HasPrefix(input, "/node "):
 			code := strings.TrimPrefix(input, "/node ")
 			fmt.Println(runNode(code))
-			continue
+			return
 		case strings.HasPrefix(input, "/search "):
 			query := strings.TrimPrefix(input, "/search ")
 			fmt.Println(webSearch(query))
-			continue
+			return
 		case strings.HasPrefix(input, "/img "):
 			path := strings.TrimPrefix(input, "/img ")
 			fmt.Println(analyzeImage(path))
-			continue
+			return
 		case strings.HasPrefix(input, "/"):
 			result := handleCommand(input, scanner)
 			fmt.Println(result)
 			fmt.Println()
-			continue
+			return
+		}
+
+		// Check if streaming - queue message
+		streamMutex.Lock()
+		streaming := isStreaming
+		streamMutex.Unlock()
+		
+		if streaming {
+			fmt.Printf("%s📥 Queued: %s%s\n", colorYellow, input[:min(30, len(input))], colorReset)
+			select {
+			case inputQueue <- input:
+			default:
+				fmt.Printf("%s⚠️ Queue full!%s\n", colorRed, colorReset)
+			}
+			return
 		}
 
 		// Process mentions
 		input = processAtMentions(input)
 
-		// Send to AI
+		// Send to AI with cancellation support
 		history = append(history, ChatMessage{Role: "user", Content: input})
 		
-		showThinking()
-		response, _ := sendStream(apiKey, history)
-		stopThinking()
-		lastResponse = response
+		streamMutex.Lock()
+		isStreaming = true
+		currentCancel := streamCancel
+		streamMutex.Unlock()
 		
+		showThinkingAsync()
+		response, cancelled := sendStreamWithCancel(apiKey, history, currentCancel)
+		stopThinking()
+		
+		streamMutex.Lock()
+		isStreaming = false
+		streamMutex.Unlock()
+		
+		if cancelled {
+			history = history[:len(history)-1] // Remove user message
+			return
+		}
+		
+		lastResponse = response
 		appendToExport("Assistant", response)
 		totalCost = float64(totalTokens) / 1000 * costPer1KTokens
 
@@ -1810,9 +1919,19 @@ func runChatWithHistory(history []ChatMessage) {
 				Content: "Results:\n" + strings.Join(results, "\n") + "\n\nJelaskan singkat.",
 			})
 			
+			streamMutex.Lock()
+			isStreaming = true
+			currentCancel = streamCancel
+			streamMutex.Unlock()
+			
 			fmt.Printf("\n%s", colorGreen)
-			followUp, _ := sendStream(apiKey, history)
+			followUp, _ := sendStreamWithCancel(apiKey, history, currentCancel)
 			fmt.Printf("%s", colorReset)
+			
+			streamMutex.Lock()
+			isStreaming = false
+			streamMutex.Unlock()
+			
 			lastResponse = followUp
 			
 			if followUp != "" {
@@ -1825,6 +1944,168 @@ func runChatWithHistory(history []ChatMessage) {
 		
 		fmt.Printf("\n\n")
 	}
+
+	// Process queued messages
+	processQueue := func() {
+		for {
+			select {
+			case msg := <-inputQueue:
+				processInput(msg)
+			default:
+				return
+			}
+		}
+	}
+
+	// Main loop
+	for {
+		showPrompt()
+		
+		select {
+		case line, ok := <-inputChan:
+			if !ok {
+				saveMemory()
+				return
+			}
+			
+			// Handle multiline with backslash
+			if strings.HasSuffix(line, "\\") {
+				inputBuffer.WriteString(strings.TrimSuffix(line, "\\"))
+				inputBuffer.WriteString("\n")
+				fmt.Printf("%s...%s ", colorGray, colorReset)
+				continue
+			}
+			
+			if inputBuffer.Len() > 0 {
+				inputBuffer.WriteString(line)
+				pendingInput = inputBuffer.String()
+				inputBuffer.Reset()
+			} else {
+				pendingInput = line
+			}
+			
+			processInput(pendingInput)
+			processQueue()
+			
+		case <-time.After(100 * time.Millisecond):
+			// Keep prompt alive
+		}
+	}
+}
+
+// Async thinking animation
+func showThinkingAsync() {
+	isThinking = true
+	go func() {
+		i := 0
+		for isThinking {
+			streamMutex.Lock()
+			streaming := isStreaming
+			streamMutex.Unlock()
+			if !streaming {
+				break
+			}
+			fmt.Printf("\r%s%s Thinking...%s", colorYellow, thinkingFrames[i%len(thinkingFrames)], colorReset)
+			i++
+			time.Sleep(80 * time.Millisecond)
+		}
+		fmt.Print("\r" + strings.Repeat(" ", 20) + "\r")
+	}()
+}
+
+// Stream with cancel support
+func sendStreamWithCancel(apiKey string, messages []ChatMessage, cancel chan struct{}) (string, bool) {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+	
+	// Monitor cancel channel
+	go func() {
+		select {
+		case <-cancel:
+			cancelFunc()
+		case <-ctx.Done():
+		}
+	}()
+	
+	reqBody := ChatRequest{
+		Model:       modelName,
+		MaxTokens:   4096,
+		Temperature: 0.7,
+		Stream:      true,
+		Messages:    messages,
+	}
+
+	body, _ := json.Marshal(reqBody)
+	req, _ := http.NewRequestWithContext(ctx, "POST", minimaxAPIURL, bytes.NewBuffer(body))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 300 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", true // Cancelled
+		}
+		return fmt.Sprintf("Error: %v", err), false
+	}
+	defer resp.Body.Close()
+
+	stopThinking()
+	fmt.Printf("%s", colorGreen)
+	
+	var result strings.Builder
+	reader := bufio.NewReader(resp.Body)
+
+	for {
+		select {
+		case <-cancel:
+			fmt.Printf("%s", colorReset)
+			return result.String(), true
+		default:
+		}
+		
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var sr StreamResponse
+		if err := json.Unmarshal([]byte(data), &sr); err != nil {
+			continue
+		}
+
+		if len(sr.Choices) > 0 {
+			content := sr.Choices[0].Delta.Content
+			if content != "" {
+				fmt.Print(content)
+				result.WriteString(content)
+			}
+		}
+
+		if sr.Usage.TotalTokens > 0 {
+			totalTokens = sr.Usage.TotalTokens
+		}
+	}
+
+	fmt.Printf("%s", colorReset)
+	return result.String(), false
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func handleCommand(input string, scanner *bufio.Scanner) string {
