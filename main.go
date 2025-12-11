@@ -27,12 +27,20 @@ const (
 )
 
 func main() {
-	if len(os.Args) < 2 {
+	args := os.Args[1:]
+
+	// Termux/Android bug: os.Args may contain duplicate executable path
+	// Detect and skip if args[0] looks like a path to this executable
+	if len(args) > 0 && (strings.HasSuffix(args[0], "/mytool") || strings.HasSuffix(args[0], "\\mytool.exe")) {
+		args = args[1:]
+	}
+
+	if len(args) < 1 {
 		printHelp()
 		return
 	}
 
-	command := os.Args[1]
+	command := args[0]
 
 	switch command {
 	case "version", "-v", "--version":
