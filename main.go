@@ -304,18 +304,16 @@ func runChat(args []string) {
 	}
 
 	// Interactive mode
-	fmt.Println()
-	fmt.Printf("%s╔═══════════════════════════════════════╗%s\n", colorCyan, colorReset)
-	fmt.Printf("%s║         Minimax AI Chat               ║%s\n", colorCyan, colorReset)
-	fmt.Printf("%s╚═══════════════════════════════════════╝%s\n", colorCyan, colorReset)
-	fmt.Printf("%sType 'exit' or 'quit' to end the conversation%s\n", colorGray, colorReset)
-	fmt.Println()
+	fmt.Printf("%s╭─────────────────────────────────────╮%s\n", colorCyan, colorReset)
+	fmt.Printf("%s│  %smytool%s - AI Assistant              %s│%s\n", colorCyan, colorGreen, colorReset, colorCyan, colorReset)
+	fmt.Printf("%s╰─────────────────────────────────────╯%s\n", colorCyan, colorReset)
+	fmt.Printf("%sKetik pertanyaan, 'exit' untuk keluar%s\n\n", colorGray, colorReset)
 
 	var history []ChatMessage
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
-		fmt.Printf("%sYou: %s", colorYellow, colorReset)
+		fmt.Printf("%s> %s", colorYellow, colorReset)
 		if !scanner.Scan() {
 			break
 		}
@@ -348,7 +346,7 @@ func runChat(args []string) {
 
 		history = append(history, ChatMessage{Role: "user", Content: input})
 
-		fmt.Printf("%sAI: %s%s", colorCyan, colorReset, colorGreen)
+		fmt.Printf("%s", colorGreen)
 		response, err := sendMessageStream(apiKey, history)
 		fmt.Printf("%s", colorReset)
 		if err != nil {
