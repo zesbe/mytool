@@ -21,7 +21,7 @@ import (
 )
 
 var (
-	version   = "3.0.0"
+	version   = "3.1.0"
 	buildTime = time.Now().Format("2006-01-02")
 )
 
@@ -68,7 +68,32 @@ var (
 	thinkingFrames  = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	memory          = make(map[string]string)
 	chatExportFile  string
+	settings        Settings
+	mcpServers      []MCPServer
 )
+
+// Settings structure
+type Settings struct {
+	Model             string `json:"model"`
+	ReasoningLevel    string `json:"reasoning_level"`
+	DiffDisplayMode   string `json:"diff_display_mode"`
+	TodoDisplayMode   string `json:"todo_display_mode"`
+	CloudSync         bool   `json:"cloud_sync"`
+	ShowThinking      bool   `json:"show_thinking"`
+	PlaySounds        bool   `json:"play_sounds"`
+	CompletionSound   string `json:"completion_sound"`
+	AllowBackground   bool   `json:"allow_background"`
+	CustomDroids      bool   `json:"custom_droids"`
+}
+
+// MCP Server structure  
+type MCPServer struct {
+	Name      string `json:"name"`
+	URL       string `json:"url"`
+	Type      string `json:"type"`
+	Connected bool   `json:"connected"`
+	Tools     []string `json:"tools"`
+}
 
 type UndoAction struct {
 	Type    string
@@ -125,6 +150,8 @@ func main() {
 	sessionID = generateSessionID()
 	detectProject()
 	loadMemory()
+	loadSettings()
+	loadMCPServers()
 
 	// Graceful shutdown
 	c := make(chan os.Signal, 1)
@@ -450,6 +477,246 @@ func rememberFact(key, value string) {
 func forgetFact(key string) {
 	delete(memory, key)
 	saveMemory()
+}
+
+// ==================== SETTINGS ====================
+
+func loadSettings() {
+	home, _ := os.UserHomeDir()
+	data, err := os.ReadFile(filepath.Join(home, ".mytool", "settings.json"))
+	if err != nil {
+		// Default settings
+		settings = Settings{
+			Model:           modelName,
+			ReasoningLevel:  "High",
+			DiffDisplayMode: "GitHub",
+			TodoDisplayMode: "In message flow",
+			CloudSync:       false,
+			ShowThinking:    true,
+			PlaySounds:      false,
+			CompletionSound: "FX-OK01",
+			AllowBackground: true,
+			CustomDroids:    true,
+		}
+		return
+	}
+	json.Unmarshal(data, &settings)
+}
+
+func saveSettings() {
+	home, _ := os.UserHomeDir()
+	os.MkdirAll(filepath.Join(home, ".mytool"), 0755)
+	data, _ := json.MarshalIndent(settings, "", "  ")
+	os.WriteFile(filepath.Join(home, ".mytool", "settings.json"), data, 0644)
+}
+
+func showSettings(scanner *bufio.Scanner) {
+	for {
+		fmt.Print("\033[H\033[2J") // Clear screen
+		fmt.Printf("%s┌─────────────────────────────────────┐%s\n", colorCyan, colorReset)
+		fmt.Printf("%s│           Settings                  │%s\n", colorCyan, colorReset)
+		fmt.Printf("%s└─────────────────────────────────────┘%s\n", colorCyan, colorReset)
+		
+		fmt.Printf("\n%sModel & Reasoning%s\n", colorYellow, colorReset)
+		fmt.Printf("  1. Model: %s%s%s\n", colorGreen, settings.Model, colorReset)
+		fmt.Printf("  2. Reasoning level: %s\n", settings.ReasoningLevel)
+		
+		fmt.Printf("\n%sPreferences%s\n", colorYellow, colorReset)
+		fmt.Printf("  3. Diff display mode: %s\n", settings.DiffDisplayMode)
+		fmt.Printf("  4. Todo display mode: %s\n", settings.TodoDisplayMode)
+		fmt.Printf("  5. Cloud session sync: %s\n", boolToOnOff(settings.CloudSync))
+		fmt.Printf("  6. Show thinking: %s\n", boolToOnOff(settings.ShowThinking))
+		
+		fmt.Printf("\n%sSounds%s\n", colorYellow, colorReset)
+		fmt.Printf("  7. Play sounds: %s\n", boolToOnOff(settings.PlaySounds))
+		fmt.Printf("  8. Completion sound: %s\n", settings.CompletionSound)
+		
+		fmt.Printf("\n%sExperimental%s\n", colorYellow, colorReset)
+		fmt.Printf("  9. Allow Background Processes: %s\n", boolToOnOff(settings.AllowBackground))
+		fmt.Printf("  10. Custom Droids: %s\n", boolToOnOff(settings.CustomDroids))
+		
+		fmt.Printf("\n%sPress number to toggle, 'q' to exit%s\n", colorGray, colorReset)
+		fmt.Printf("> ")
+		
+		if !scanner.Scan() {
+			break
+		}
+		input := strings.TrimSpace(scanner.Text())
+		
+		switch input {
+		case "q", "Q", "exit":
+			saveSettings()
+			return
+		case "1":
+			fmt.Printf("Enter model name: ")
+			if scanner.Scan() {
+				settings.Model = strings.TrimSpace(scanner.Text())
+			}
+		case "2":
+			if settings.ReasoningLevel == "High" {
+				settings.ReasoningLevel = "Medium"
+			} else if settings.ReasoningLevel == "Medium" {
+				settings.ReasoningLevel = "Low"
+			} else {
+				settings.ReasoningLevel = "High"
+			}
+		case "3":
+			if settings.DiffDisplayMode == "GitHub" {
+				settings.DiffDisplayMode = "Unified"
+			} else {
+				settings.DiffDisplayMode = "GitHub"
+			}
+		case "4":
+			if settings.TodoDisplayMode == "In message flow" {
+				settings.TodoDisplayMode = "Sidebar"
+			} else {
+				settings.TodoDisplayMode = "In message flow"
+			}
+		case "5":
+			settings.CloudSync = !settings.CloudSync
+		case "6":
+			settings.ShowThinking = !settings.ShowThinking
+		case "7":
+			settings.PlaySounds = !settings.PlaySounds
+		case "9":
+			settings.AllowBackground = !settings.AllowBackground
+		case "10":
+			settings.CustomDroids = !settings.CustomDroids
+		}
+		saveSettings()
+	}
+}
+
+func boolToOnOff(b bool) string {
+	if b {
+		return fmt.Sprintf("%sOn%s", colorGreen, colorReset)
+	}
+	return fmt.Sprintf("%sOff%s", colorRed, colorReset)
+}
+
+// ==================== MCP SERVERS ====================
+
+func loadMCPServers() {
+	home, _ := os.UserHomeDir()
+	data, err := os.ReadFile(filepath.Join(home, ".mytool", "mcp_servers.json"))
+	if err != nil {
+		// Default MCP servers
+		mcpServers = []MCPServer{
+			{Name: "browser-use", URL: "localhost:3000", Type: "browser", Connected: false, Tools: []string{"browse", "click", "type", "screenshot"}},
+			{Name: "context7", URL: "localhost:3001", Type: "context", Connected: false, Tools: []string{"search_docs", "get_context"}},
+		}
+		return
+	}
+	json.Unmarshal(data, &mcpServers)
+}
+
+func saveMCPServers() {
+	home, _ := os.UserHomeDir()
+	os.MkdirAll(filepath.Join(home, ".mytool"), 0755)
+	data, _ := json.MarshalIndent(mcpServers, "", "  ")
+	os.WriteFile(filepath.Join(home, ".mytool", "mcp_servers.json"), data, 0644)
+}
+
+func showMCPServers(scanner *bufio.Scanner) {
+	for {
+		fmt.Print("\033[H\033[2J")
+		fmt.Printf("%s┌─────────────────────────────────────┐%s\n", colorCyan, colorReset)
+		fmt.Printf("%s│       Manage MCP servers            │%s\n", colorCyan, colorReset)
+		fmt.Printf("%s└─────────────────────────────────────┘%s\n", colorCyan, colorReset)
+		
+		for i, server := range mcpServers {
+			status := fmt.Sprintf("%s(disconnected)%s", colorRed, colorReset)
+			if server.Connected {
+				status = fmt.Sprintf("%s(connected)%s", colorGreen, colorReset)
+			}
+			fmt.Printf("  %d. %s %s\n", i+1, server.Name, status)
+		}
+		
+		fmt.Printf("\n  %s+%s Add MCP server from registry\n", colorGreen, colorReset)
+		fmt.Printf("  %s+%s Add MCP server manually\n", colorGreen, colorReset)
+		
+		fmt.Printf("\n%sEnter number to toggle, 'a' to add, 'd' to delete, 'q' to exit%s\n", colorGray, colorReset)
+		fmt.Printf("> ")
+		
+		if !scanner.Scan() {
+			break
+		}
+		input := strings.TrimSpace(scanner.Text())
+		
+		if input == "q" || input == "Q" {
+			return
+		}
+		
+		if input == "a" || input == "A" {
+			fmt.Printf("Server name: ")
+			if !scanner.Scan() {
+				continue
+			}
+			name := strings.TrimSpace(scanner.Text())
+			
+			fmt.Printf("Server URL: ")
+			if !scanner.Scan() {
+				continue
+			}
+			url := strings.TrimSpace(scanner.Text())
+			
+			mcpServers = append(mcpServers, MCPServer{
+				Name:      name,
+				URL:       url,
+				Type:      "custom",
+				Connected: false,
+				Tools:     []string{},
+			})
+			saveMCPServers()
+			fmt.Printf("%s✓ Added: %s%s\n", colorGreen, name, colorReset)
+			time.Sleep(time.Second)
+			continue
+		}
+		
+		if strings.HasPrefix(input, "d") {
+			parts := strings.Fields(input)
+			if len(parts) > 1 {
+				if idx := parseInt(parts[1]) - 1; idx >= 0 && idx < len(mcpServers) {
+					name := mcpServers[idx].Name
+					mcpServers = append(mcpServers[:idx], mcpServers[idx+1:]...)
+					saveMCPServers()
+					fmt.Printf("%s✓ Removed: %s%s\n", colorRed, name, colorReset)
+					time.Sleep(time.Second)
+				}
+			}
+			continue
+		}
+		
+		// Toggle connection
+		if idx := parseInt(input) - 1; idx >= 0 && idx < len(mcpServers) {
+			mcpServers[idx].Connected = !mcpServers[idx].Connected
+			status := "disconnected"
+			if mcpServers[idx].Connected {
+				status = "connected"
+			}
+			saveMCPServers()
+			fmt.Printf("%s✓ %s: %s%s\n", colorGreen, mcpServers[idx].Name, status, colorReset)
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+}
+
+func parseInt(s string) int {
+	var n int
+	fmt.Sscanf(s, "%d", &n)
+	return n
+}
+
+func getMCPTools() []string {
+	var tools []string
+	for _, server := range mcpServers {
+		if server.Connected {
+			for _, tool := range server.Tools {
+				tools = append(tools, fmt.Sprintf("%s:%s", server.Name, tool))
+			}
+		}
+	}
+	return tools
 }
 
 // ==================== SESSIONS ====================
@@ -1533,6 +1800,8 @@ func handleCommand(input string, scanner *bufio.Scanner) string {
 /node <c>   Run JavaScript
 /search <q> Web search
 /img <f>    Analyze image
+/settings   Open settings menu
+/mcp        Manage MCP servers
 /mode       Toggle mode
 /undo       Undo change
 /save       Save session
@@ -1545,6 +1814,12 @@ func handleCommand(input string, scanner *bufio.Scanner) string {
 /forget <k> Forget fact
 /clear      Clear history
 exit        Quit`
+	case "/settings":
+		showSettings(scanner)
+		return ""
+	case "/mcp":
+		showMCPServers(scanner)
+		return ""
 	case "/read", "/cat":
 		return cmdRead(arg)
 	case "/ls", "/dir":
