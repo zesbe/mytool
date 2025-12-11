@@ -108,6 +108,19 @@ func main() {
 	}
 }
 
+func printBanner() {
+	banner := `
+%s███╗   ███╗██╗   ██╗████████╗ ██████╗  ██████╗ ██╗     
+████╗ ████║╚██╗ ██╔╝╚══██╔══╝██╔═══██╗██╔═══██╗██║     
+██╔████╔██║ ╚████╔╝    ██║   ██║   ██║██║   ██║██║     
+██║╚██╔╝██║  ╚██╔╝     ██║   ██║   ██║██║   ██║██║     
+██║ ╚═╝ ██║   ██║      ██║   ╚██████╔╝╚██████╔╝███████╗
+╚═╝     ╚═╝   ╚═╝      ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝%s
+                              %sv%s%s
+`
+	fmt.Printf(banner, colorCyan, colorReset, colorGray, version, colorReset)
+}
+
 func printHelp() {
 	fmt.Printf("\n%smytool%s v%s - AI Assistant dengan akses sistem\n\n", colorGreen, colorReset, version)
 	fmt.Printf("%sUsage:%s mytool [command]\n\n", colorYellow, colorReset)
@@ -665,10 +678,13 @@ func runChat(args []string) {
 		return
 	}
 
-	// Interactive mode
-	fmt.Printf("\n%smytool%s - AI Assistant\n", colorGreen, colorReset)
-	fmt.Printf("%sKetik /help untuk bantuan, 'exit' untuk keluar%s\n", colorGray, colorReset)
-	fmt.Printf("%sDir: %s%s\n\n", colorGray, currentDir, colorReset)
+	// Interactive mode - Show banner
+	printBanner()
+	fmt.Printf("%sYou are standing in an open terminal. An AI awaits your commands.%s\n\n", colorGray, colorReset)
+	fmt.Printf("ENTER to send • /help for commands • exit to quit\n")
+	fmt.Printf("                              %sCurrent folder:%s %s\n\n", colorGray, colorReset, currentDir)
+	fmt.Printf("%sAuto mode%s - AI can read/write files and run commands\n", colorYellow, colorReset)
+	fmt.Println()
 
 	history := []ChatMessage{
 		{Role: "system", Content: getSystemPrompt()},
