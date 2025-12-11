@@ -18,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 var (
@@ -511,90 +513,67 @@ func saveSettings() {
 }
 
 func showSettings(scanner *bufio.Scanner) {
-	fmt.Printf("\n%s=== Settings ===%s\n", colorCyan, colorReset)
-	
-	fmt.Printf("\n%sModel & Reasoning%s\n", colorYellow, colorReset)
-	fmt.Printf("  1. Model: %s%s%s\n", colorGreen, settings.Model, colorReset)
-	fmt.Printf("  2. Reasoning level: %s\n", settings.ReasoningLevel)
-	
-	fmt.Printf("\n%sPreferences%s\n", colorYellow, colorReset)
-	fmt.Printf("  3. Diff display mode: %s\n", settings.DiffDisplayMode)
-	fmt.Printf("  4. Todo display mode: %s\n", settings.TodoDisplayMode)
-	fmt.Printf("  5. Cloud session sync: %s\n", boolToOnOff(settings.CloudSync))
-	fmt.Printf("  6. Show thinking: %s\n", boolToOnOff(settings.ShowThinking))
-	
-	fmt.Printf("\n%sSounds%s\n", colorYellow, colorReset)
-	fmt.Printf("  7. Play sounds: %s\n", boolToOnOff(settings.PlaySounds))
-	
-	fmt.Printf("\n%sExperimental%s\n", colorYellow, colorReset)
-	fmt.Printf("  8. Allow Background: %s\n", boolToOnOff(settings.AllowBackground))
-	fmt.Printf("  9. Custom Droids: %s\n", boolToOnOff(settings.CustomDroids))
-	
-	fmt.Printf("\n%sEnter number to toggle, 'q' to exit%s\n", colorGray, colorReset)
-	
 	for {
-		fmt.Printf("%ssettings>%s ", colorCyan, colorReset)
-		
-		if !scanner.Scan() {
-			return
+		options := []string{
+			fmt.Sprintf("Model: %s", settings.Model),
+			fmt.Sprintf("Reasoning: %s", settings.ReasoningLevel),
+			fmt.Sprintf("Diff mode: %s", settings.DiffDisplayMode),
+			fmt.Sprintf("Todo mode: %s", settings.TodoDisplayMode),
+			fmt.Sprintf("Cloud sync: %s", boolToStr(settings.CloudSync)),
+			fmt.Sprintf("Show thinking: %s", boolToStr(settings.ShowThinking)),
+			fmt.Sprintf("Play sounds: %s", boolToStr(settings.PlaySounds)),
+			fmt.Sprintf("Allow background: %s", boolToStr(settings.AllowBackground)),
+			fmt.Sprintf("Custom droids: %s", boolToStr(settings.CustomDroids)),
+			"← Back to chat",
 		}
-		input := strings.TrimSpace(scanner.Text())
 		
-		if input == "" {
-			continue
-		}
+		choice := selectMenu("⚙️  Settings", options, 0)
 		
-		switch input {
-		case "q", "Q", "exit", "back":
+		if choice == -1 || choice == len(options)-1 {
 			saveSettings()
-			fmt.Printf("%s← Back to chat%s\n", colorGray, colorReset)
 			return
-		case "1":
-			fmt.Printf("Enter model name: ")
+		}
+		
+		switch choice {
+		case 0: // Model
+			fmt.Print("\033[H\033[2J")
+			fmt.Printf("Current model: %s\n", settings.Model)
+			fmt.Printf("Enter new model name (or press Enter to cancel): ")
+			
+			// Restore terminal for input
 			if scanner.Scan() {
-				settings.Model = strings.TrimSpace(scanner.Text())
-				fmt.Printf("%s✓ Model: %s%s\n", colorGreen, settings.Model, colorReset)
+				if name := strings.TrimSpace(scanner.Text()); name != "" {
+					settings.Model = name
+				}
 			}
-		case "2":
-			if settings.ReasoningLevel == "High" {
-				settings.ReasoningLevel = "Medium"
-			} else if settings.ReasoningLevel == "Medium" {
-				settings.ReasoningLevel = "Low"
-			} else {
-				settings.ReasoningLevel = "High"
+		case 1: // Reasoning
+			levels := []string{"High", "Medium", "Low", "← Back"}
+			idx := selectMenu("Reasoning Level", levels, 0)
+			if idx >= 0 && idx < 3 {
+				settings.ReasoningLevel = levels[idx]
 			}
-			fmt.Printf("%s✓ Reasoning: %s%s\n", colorGreen, settings.ReasoningLevel, colorReset)
-		case "3":
-			if settings.DiffDisplayMode == "GitHub" {
-				settings.DiffDisplayMode = "Unified"
-			} else {
-				settings.DiffDisplayMode = "GitHub"
+		case 2: // Diff mode
+			modes := []string{"GitHub", "Unified", "← Back"}
+			idx := selectMenu("Diff Display Mode", modes, 0)
+			if idx >= 0 && idx < 2 {
+				settings.DiffDisplayMode = modes[idx]
 			}
-			fmt.Printf("%s✓ Diff mode: %s%s\n", colorGreen, settings.DiffDisplayMode, colorReset)
-		case "4":
-			if settings.TodoDisplayMode == "In message flow" {
-				settings.TodoDisplayMode = "Sidebar"
-			} else {
-				settings.TodoDisplayMode = "In message flow"
+		case 3: // Todo mode
+			modes := []string{"In message flow", "Sidebar", "← Back"}
+			idx := selectMenu("Todo Display Mode", modes, 0)
+			if idx >= 0 && idx < 2 {
+				settings.TodoDisplayMode = modes[idx]
 			}
-			fmt.Printf("%s✓ Todo mode: %s%s\n", colorGreen, settings.TodoDisplayMode, colorReset)
-		case "5":
+		case 4:
 			settings.CloudSync = !settings.CloudSync
-			fmt.Printf("%s✓ Cloud sync: %s%s\n", colorGreen, boolToStr(settings.CloudSync), colorReset)
-		case "6":
+		case 5:
 			settings.ShowThinking = !settings.ShowThinking
-			fmt.Printf("%s✓ Show thinking: %s%s\n", colorGreen, boolToStr(settings.ShowThinking), colorReset)
-		case "7":
+		case 6:
 			settings.PlaySounds = !settings.PlaySounds
-			fmt.Printf("%s✓ Play sounds: %s%s\n", colorGreen, boolToStr(settings.PlaySounds), colorReset)
-		case "8":
+		case 7:
 			settings.AllowBackground = !settings.AllowBackground
-			fmt.Printf("%s✓ Allow background: %s%s\n", colorGreen, boolToStr(settings.AllowBackground), colorReset)
-		case "9":
+		case 8:
 			settings.CustomDroids = !settings.CustomDroids
-			fmt.Printf("%s✓ Custom droids: %s%s\n", colorGreen, boolToStr(settings.CustomDroids), colorReset)
-		default:
-			fmt.Printf("%sUnknown option. Type 'q' to exit.%s\n", colorRed, colorReset)
 		}
 		saveSettings()
 	}
@@ -605,6 +584,61 @@ func boolToStr(b bool) string {
 		return "On"
 	}
 	return "Off"
+}
+
+// Interactive menu with arrow keys
+func selectMenu(title string, options []string, selected int) int {
+	// Save terminal state
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return -1
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+	cursor := selected
+	if cursor < 0 || cursor >= len(options) {
+		cursor = 0
+	}
+
+	for {
+		// Clear and draw menu
+		fmt.Print("\033[H\033[2J") // Clear screen
+		fmt.Printf("%s%s%s\n\n", colorCyan, title, colorReset)
+		
+		for i, opt := range options {
+			if i == cursor {
+				fmt.Printf("  %s> %s%s\n", colorGreen, opt, colorReset)
+			} else {
+				fmt.Printf("    %s\n", opt)
+			}
+		}
+		
+		fmt.Printf("\n%s↑↓ Navigate • Enter Select • q Quit%s", colorGray, colorReset)
+
+		// Read key
+		buf := make([]byte, 3)
+		n, _ := os.Stdin.Read(buf)
+		
+		if n == 1 {
+			switch buf[0] {
+			case 'q', 'Q', 27: // q or ESC
+				return -1
+			case 13, 10: // Enter
+				return cursor
+			case 'j', 'J': // vim down
+				cursor = (cursor + 1) % len(options)
+			case 'k', 'K': // vim up
+				cursor = (cursor - 1 + len(options)) % len(options)
+			}
+		} else if n == 3 && buf[0] == 27 && buf[1] == 91 {
+			switch buf[2] {
+			case 65: // Up arrow
+				cursor = (cursor - 1 + len(options)) % len(options)
+			case 66: // Down arrow
+				cursor = (cursor + 1) % len(options)
+			}
+		}
+	}
 }
 
 func boolToOnOff(b bool) string {
@@ -638,71 +672,46 @@ func saveMCPServers() {
 }
 
 func showMCPServers(scanner *bufio.Scanner) {
-	fmt.Printf("\n%s=== MCP Servers ===%s\n\n", colorCyan, colorReset)
-	
-	for i, server := range mcpServers {
-		status := fmt.Sprintf("%s(disconnected)%s", colorRed, colorReset)
-		if server.Connected {
-			status = fmt.Sprintf("%s(connected)%s", colorGreen, colorReset)
-		}
-		fmt.Printf("  %d. %s %s\n", i+1, server.Name, status)
-	}
-	
-	fmt.Printf("\n%sCommands:%s\n", colorYellow, colorReset)
-	fmt.Println("  [1-9]     Toggle connection")
-	fmt.Println("  a         Add new server")
-	fmt.Println("  d [num]   Delete server (e.g. d 1)")
-	fmt.Println("  q         Back to chat")
-	
 	for {
-		fmt.Printf("\n%smcp>%s ", colorCyan, colorReset)
+		// Build options list
+		options := []string{}
+		for _, server := range mcpServers {
+			status := "○"
+			if server.Connected {
+				status = "●"
+			}
+			options = append(options, fmt.Sprintf("%s %s", status, server.Name))
+		}
+		options = append(options, "+ Add MCP server")
+		options = append(options, "← Back to chat")
 		
-		if !scanner.Scan() {
+		choice := selectMenu("🔌 MCP Servers", options, 0)
+		
+		if choice == -1 || choice == len(options)-1 {
 			return
 		}
-		input := strings.TrimSpace(scanner.Text())
 		
-		if input == "" {
-			continue
-		}
-		
-		if input == "q" || input == "Q" || input == "exit" || input == "back" {
-			fmt.Printf("%s← Back to chat%s\n", colorGray, colorReset)
-			return
-		}
-		
-		if input == "a" || input == "A" || input == "add" {
+		// Add new server
+		if choice == len(options)-2 {
+			fmt.Print("\033[H\033[2J")
+			fmt.Printf("%s=== Add MCP Server ===%s\n\n", colorCyan, colorReset)
+			
 			fmt.Printf("Server name: ")
 			if !scanner.Scan() {
 				return
 			}
 			name := strings.TrimSpace(scanner.Text())
 			if name == "" {
-				fmt.Println("Cancelled")
 				continue
 			}
 			
-			fmt.Printf("Server URL (e.g. localhost:3000): ")
+			fmt.Printf("Server URL: ")
 			if !scanner.Scan() {
 				return
 			}
 			url := strings.TrimSpace(scanner.Text())
 			if url == "" {
-				fmt.Println("Cancelled")
 				continue
-			}
-			
-			fmt.Printf("Tools (comma separated, e.g. browse,click,type): ")
-			if !scanner.Scan() {
-				return
-			}
-			toolsStr := strings.TrimSpace(scanner.Text())
-			var tools []string
-			if toolsStr != "" {
-				tools = strings.Split(toolsStr, ",")
-				for i := range tools {
-					tools[i] = strings.TrimSpace(tools[i])
-				}
 			}
 			
 			mcpServers = append(mcpServers, MCPServer{
@@ -710,37 +719,34 @@ func showMCPServers(scanner *bufio.Scanner) {
 				URL:       url,
 				Type:      "custom",
 				Connected: false,
-				Tools:     tools,
+				Tools:     []string{},
 			})
 			saveMCPServers()
-			fmt.Printf("%s✓ Added: %s (%s)%s\n", colorGreen, name, url, colorReset)
 			continue
 		}
 		
-		if strings.HasPrefix(input, "d ") || strings.HasPrefix(input, "d") && len(input) > 1 {
-			numStr := strings.TrimPrefix(strings.TrimPrefix(input, "d "), "d")
-			if idx := parseInt(numStr) - 1; idx >= 0 && idx < len(mcpServers) {
-				name := mcpServers[idx].Name
-				mcpServers = append(mcpServers[:idx], mcpServers[idx+1:]...)
+		// Toggle or manage existing server
+		if choice >= 0 && choice < len(mcpServers) {
+			serverIdx := choice
+			actions := []string{
+				"Toggle connection",
+				"Delete server",
+				"← Back",
+			}
+			
+			actionChoice := selectMenu(mcpServers[serverIdx].Name, actions, 0)
+			
+			switch actionChoice {
+			case 0: // Toggle
+				mcpServers[serverIdx].Connected = !mcpServers[serverIdx].Connected
 				saveMCPServers()
-				fmt.Printf("%s✓ Removed: %s%s\n", colorGreen, name, colorReset)
-			} else {
-				fmt.Printf("%sInvalid number%s\n", colorRed, colorReset)
+			case 1: // Delete
+				confirm := []string{"Yes, delete", "No, cancel"}
+				if selectMenu("Delete "+mcpServers[serverIdx].Name+"?", confirm, 1) == 0 {
+					mcpServers = append(mcpServers[:serverIdx], mcpServers[serverIdx+1:]...)
+					saveMCPServers()
+				}
 			}
-			continue
-		}
-		
-		// Toggle connection
-		if idx := parseInt(input) - 1; idx >= 0 && idx < len(mcpServers) {
-			mcpServers[idx].Connected = !mcpServers[idx].Connected
-			status := "disconnected"
-			if mcpServers[idx].Connected {
-				status = "connected"
-			}
-			saveMCPServers()
-			fmt.Printf("%s✓ %s: %s%s\n", colorGreen, mcpServers[idx].Name, status, colorReset)
-		} else if input != "" {
-			fmt.Printf("%sUnknown command. Type 'q' to exit.%s\n", colorRed, colorReset)
 		}
 	}
 }
