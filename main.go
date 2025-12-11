@@ -1720,13 +1720,13 @@ func runChatWithHistory(history []ChatMessage) {
 
 	for {
 		hint := hints[hintIdx%len(hints)]
-		// White box for input area
-		fmt.Printf("%s┌────────────────────────────────────────────────────────────────┐%s\n", colorWhite, colorReset)
-		fmt.Printf("%s│%s %s❯%s %s%s%s", colorWhite, colorReset, getModeColor(), colorReset, colorGray, hint, colorReset)
-		fmt.Printf("\r%s│%s %s❯%s ", colorWhite, colorReset, getModeColor(), colorReset)
+		// Input box
+		fmt.Printf("\n%s╭─ You ─────────────────────────────────────────────────────────╮%s\n", colorGray, colorReset)
+		fmt.Printf("%s│%s %s%s%s", colorGray, colorReset, colorGray, hint, colorReset)
+		fmt.Printf("\r%s│%s ", colorGray, colorReset)
 		
 		input := readMultiLine(scanner)
-		fmt.Printf("%s└────────────────────────────────────────────────────────────────┘%s\n", colorWhite, colorReset)
+		fmt.Printf("%s╰───────────────────────────────────────────────────────────────╯%s\n", colorGray, colorReset)
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
@@ -1882,7 +1882,7 @@ func runChatWithHistory(history []ChatMessage) {
 			history = append(history, ChatMessage{Role: "assistant", Content: response})
 		}
 		
-		fmt.Printf("\n\n")
+		fmt.Println()
 	}
 }
 
