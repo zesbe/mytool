@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
@@ -24,13 +28,15 @@ const (
 	colorBlue   = "\033[34m"
 	colorPurple = "\033[35m"
 	colorCyan   = "\033[36m"
+	colorGray   = "\033[90m"
 )
+
+const claudeAPIURL = "https://api.anthropic.com/v1/messages"
 
 func main() {
 	args := os.Args[1:]
 
 	// Termux/Android bug: os.Args may contain duplicate executable path
-	// Detect and skip if args[0] looks like a path to this executable
 	if len(args) > 0 && (strings.HasSuffix(args[0], "/mytool") || strings.HasSuffix(args[0], "\\mytool.exe")) {
 		args = args[1:]
 	}
@@ -41,6 +47,7 @@ func main() {
 	}
 
 	command := args[0]
+	cmdArgs := args[1:]
 
 	switch command {
 	case "version", "-v", "--version":
@@ -55,6 +62,8 @@ func main() {
 		printEnv()
 	case "disk":
 		printDisk()
+	case "chat", "ai":
+		runChat(cmdArgs)
 	case "help", "-h", "--help":
 		printHelp()
 	default:
@@ -70,21 +79,24 @@ func printHelp() {
 	fmt.Printf("%s║           mytool CLI v%-16s║%s\n", colorCyan, version, colorReset)
 	fmt.Printf("%s╚═══════════════════════════════════════╝%s\n", colorCyan, colorReset)
 	fmt.Println()
-	fmt.Println("Usage: mytool <command>")
+	fmt.Println("Usage: mytool <command> [arguments]")
 	fmt.Println()
 	fmt.Printf("%sAvailable Commands:%s\n", colorYellow, colorReset)
-	fmt.Println("  version    Show version information")
-	fmt.Println("  info       Display system information")
-	fmt.Println("  ip         Show public IP address")
-	fmt.Println("  time       Display current time in multiple formats")
-	fmt.Println("  env        List environment variables")
-	fmt.Println("  disk       Show disk usage")
-	fmt.Println("  help       Show this help message")
+	fmt.Println("  version       Show version information")
+	fmt.Println("  info          Display system information")
+	fmt.Println("  ip            Show public IP address")
+	fmt.Println("  time          Display current time in multiple formats")
+	fmt.Println("  env           List environment variables")
+	fmt.Println("  disk          Show disk usage")
+	fmt.Println("  chat [msg]    Chat with Claude AI")
+	fmt.Println("  help          Show this help message")
 	fmt.Println()
-	fmt.Printf("%sExamples:%s\n", colorYellow, colorReset)
-	fmt.Println("  mytool version")
-	fmt.Println("  mytool info")
-	fmt.Println("  mytool ip")
+	fmt.Printf("%sChat Examples:%s\n", colorYellow, colorReset)
+	fmt.Println("  mytool chat                     # Interactive mode")
+	fmt.Println("  mytool chat \"Hello, Claude!\"    # Single message")
+	fmt.Println()
+	fmt.Printf("%sEnvironment:%s\n", colorYellow, colorReset)
+	fmt.Println("  ANTHROPIC_API_KEY    Required for chat command")
 	fmt.Println()
 }
 
@@ -127,7 +139,6 @@ func printSystemInfo() {
 func printIP() {
 	fmt.Printf("%sFetching public IP...%s\n", colorYellow, colorReset)
 
-	// Try multiple services
 	services := []string{
 		"https://ifconfig.me",
 		"https://api.ipify.org",
@@ -178,13 +189,11 @@ func printEnv() {
 	fmt.Printf("%s[ Environment Variables ]%s\n", colorCyan, colorReset)
 	fmt.Println(strings.Repeat("─", 40))
 
-	// Show important env vars
 	important := []string{"PATH", "HOME", "USER", "SHELL", "LANG", "TERM", "EDITOR", "GOPATH", "GOROOT"}
 
 	for _, key := range important {
 		value := os.Getenv(key)
 		if value != "" {
-			// Truncate long values
 			if len(value) > 60 {
 				value = value[:57] + "..."
 			}
@@ -228,8 +237,175 @@ func printDisk() {
 	fmt.Println()
 }
 
-// Helper for JSON output (can be extended)
-func toJSON(v interface{}) string {
-	b, _ := json.MarshalIndent(v, "", "  ")
-	return string(b)
+// ==================== CLAUDE CHAT ====================
+
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type ChatRequest struct {
+	Model     string        `json:"model"`
+	MaxTokens int           `json:"max_tokens"`
+	Messages  []ChatMessage `json:"messages"`
+}
+
+type ContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type ChatResponse struct {
+	Content []ContentBlock `json:"content"`
+	Error   *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+func runChat(args []string) {
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		fmt.Printf("%sError: ANTHROPIC_API_KEY environment variable not set%s\n", colorRed, colorReset)
+		fmt.Println()
+		fmt.Println("To get an API key:")
+		fmt.Println("  1. Go to https://console.anthropic.com/")
+		fmt.Println("  2. Create an account or sign in")
+		fmt.Println("  3. Go to API Keys and create a new key")
+		fmt.Println()
+		fmt.Println("Then set the key:")
+		fmt.Printf("  export ANTHROPIC_API_KEY=\"your-api-key\"\n")
+		fmt.Println()
+		os.Exit(1)
+	}
+
+	// If message provided as argument, send single message
+	if len(args) > 0 {
+		message := strings.Join(args, " ")
+		response, err := sendMessage(apiKey, []ChatMessage{{Role: "user", Content: message}})
+		if err != nil {
+			fmt.Printf("%sError: %s%s\n", colorRed, err, colorReset)
+			os.Exit(1)
+		}
+		fmt.Printf("%s%s%s\n", colorGreen, response, colorReset)
+		return
+	}
+
+	// Interactive mode
+	fmt.Println()
+	fmt.Printf("%s╔═══════════════════════════════════════╗%s\n", colorCyan, colorReset)
+	fmt.Printf("%s║         Claude AI Chat                ║%s\n", colorCyan, colorReset)
+	fmt.Printf("%s╚═══════════════════════════════════════╝%s\n", colorCyan, colorReset)
+	fmt.Printf("%sType 'exit' or 'quit' to end the conversation%s\n", colorGray, colorReset)
+	fmt.Println()
+
+	var history []ChatMessage
+	scanner := bufio.NewScanner(os.Stdin)
+
+	for {
+		fmt.Printf("%sYou: %s", colorYellow, colorReset)
+		if !scanner.Scan() {
+			break
+		}
+
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			continue
+		}
+
+		if input == "exit" || input == "quit" || input == "/exit" || input == "/quit" {
+			fmt.Printf("%sGoodbye!%s\n", colorCyan, colorReset)
+			break
+		}
+
+		if input == "/clear" {
+			history = nil
+			fmt.Printf("%sConversation cleared.%s\n", colorGray, colorReset)
+			continue
+		}
+
+		if input == "/help" {
+			fmt.Println()
+			fmt.Printf("%sCommands:%s\n", colorYellow, colorReset)
+			fmt.Println("  /clear  - Clear conversation history")
+			fmt.Println("  /help   - Show this help")
+			fmt.Println("  /exit   - Exit chat")
+			fmt.Println()
+			continue
+		}
+
+		history = append(history, ChatMessage{Role: "user", Content: input})
+
+		fmt.Printf("%sClaude: %s", colorCyan, colorReset)
+		response, err := sendMessage(apiKey, history)
+		if err != nil {
+			fmt.Printf("%sError: %s%s\n", colorRed, err, colorReset)
+			// Remove failed message from history
+			history = history[:len(history)-1]
+			continue
+		}
+
+		fmt.Printf("%s%s%s\n\n", colorGreen, response, colorReset)
+		history = append(history, ChatMessage{Role: "assistant", Content: response})
+	}
+}
+
+func sendMessage(apiKey string, messages []ChatMessage) (string, error) {
+	reqBody := ChatRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 4096,
+		Messages:  messages,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", claudeAPIURL, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp ChatResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != nil {
+			return "", fmt.Errorf("API error: %s", errResp.Error.Message)
+		}
+		return "", fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var chatResp ChatResponse
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(chatResp.Content) == 0 {
+		return "", fmt.Errorf("empty response from API")
+	}
+
+	// Combine all text content blocks
+	var result strings.Builder
+	for _, block := range chatResp.Content {
+		if block.Type == "text" {
+			result.WriteString(block.Text)
+		}
+	}
+
+	return result.String(), nil
 }
