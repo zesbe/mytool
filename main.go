@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -33,7 +34,6 @@ const (
 
 const minimaxAPIURL = "https://api.minimax.io/v1/chat/completions"
 
-// Streaming response structures
 type StreamChoice struct {
 	Delta struct {
 		Content string `json:"content"`
@@ -45,16 +45,40 @@ type StreamResponse struct {
 	Choices []StreamChoice `json:"choices"`
 }
 
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type ChatRequest struct {
+	Model     string        `json:"model"`
+	MaxTokens int           `json:"max_tokens,omitempty"`
+	Messages  []ChatMessage `json:"messages"`
+	Stream    bool          `json:"stream,omitempty"`
+}
+
+type ChatChoice struct {
+	Message ChatMessage `json:"message"`
+}
+
+type ChatResponse struct {
+	Choices []ChatChoice `json:"choices"`
+	Error   *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+var currentDir string
+
 func main() {
+	currentDir, _ = os.Getwd()
 	args := os.Args[1:]
 
-	// Termux/Android bug: os.Args may contain duplicate executable path
 	if len(args) > 0 && (strings.HasSuffix(args[0], "/mytool") || strings.HasSuffix(args[0], "\\mytool.exe")) {
 		args = args[1:]
 	}
 
 	if len(args) < 1 {
-		// Default: langsung masuk chat mode
 		runChat([]string{})
 		return
 	}
@@ -80,35 +104,29 @@ func main() {
 	case "help", "-h", "--help":
 		printHelp()
 	default:
-		// Treat unknown command as chat message
 		runChat(args)
 	}
 }
 
 func printHelp() {
-	fmt.Println()
-	fmt.Printf("%s╔═══════════════════════════════════════╗%s\n", colorCyan, colorReset)
-	fmt.Printf("%s║           mytool CLI v%-16s║%s\n", colorCyan, version, colorReset)
-	fmt.Printf("%s╚═══════════════════════════════════════╝%s\n", colorCyan, colorReset)
-	fmt.Println()
-	fmt.Println("Usage: mytool <command> [arguments]")
-	fmt.Println()
-	fmt.Printf("%sAvailable Commands:%s\n", colorYellow, colorReset)
-	fmt.Println("  version       Show version information")
-	fmt.Println("  info          Display system information")
-	fmt.Println("  ip            Show public IP address")
-	fmt.Println("  time          Display current time in multiple formats")
-	fmt.Println("  env           List environment variables")
-	fmt.Println("  disk          Show disk usage")
-	fmt.Println("  chat [msg]    Chat with Minimax AI")
-	fmt.Println("  help          Show this help message")
-	fmt.Println()
-	fmt.Printf("%sChat Examples:%s\n", colorYellow, colorReset)
-	fmt.Println("  mytool chat                     # Interactive mode")
-	fmt.Println("  mytool chat \"Hello!\"            # Single message")
-	fmt.Println()
-	fmt.Printf("%sEnvironment:%s\n", colorYellow, colorReset)
-	fmt.Println("  MINIMAX_API_KEY    Required for chat command")
+	fmt.Printf("\n%smytool%s v%s - AI Assistant dengan akses sistem\n\n", colorGreen, colorReset, version)
+	fmt.Printf("%sUsage:%s mytool [command]\n\n", colorYellow, colorReset)
+	fmt.Printf("%sCommands:%s\n", colorYellow, colorReset)
+	fmt.Println("  (tanpa args)  Masuk mode chat interaktif")
+	fmt.Println("  \"pesan\"       Kirim pesan langsung ke AI")
+	fmt.Println("  help          Tampilkan bantuan ini")
+	fmt.Println("  version       Tampilkan versi")
+	fmt.Println("  info          Info sistem")
+	fmt.Printf("\n%sChat Commands:%s\n", colorYellow, colorReset)
+	fmt.Println("  /read <file>      Baca isi file")
+	fmt.Println("  /ls [dir]         List direktori")
+	fmt.Println("  /edit <file>      Edit file (interactive)")
+	fmt.Println("  /run <cmd>        Jalankan command")
+	fmt.Println("  /cd <dir>         Pindah direktori")
+	fmt.Println("  /pwd              Tampilkan direktori saat ini")
+	fmt.Println("  /clear            Hapus history chat")
+	fmt.Println("  /help             Tampilkan bantuan")
+	fmt.Println("  exit              Keluar")
 	fmt.Println()
 }
 
@@ -121,179 +139,256 @@ func printVersion() {
 }
 
 func printSystemInfo() {
-	fmt.Println()
-	fmt.Printf("%s[ System Information ]%s\n", colorCyan, colorReset)
-	fmt.Println(strings.Repeat("─", 40))
-
+	fmt.Printf("\n%s[ System Information ]%s\n", colorCyan, colorReset)
+	fmt.Println(strings.Repeat("-", 40))
 	hostname, _ := os.Hostname()
 	wd, _ := os.Getwd()
-
-	info := map[string]string{
-		"Hostname":     hostname,
-		"OS":           runtime.GOOS,
-		"Architecture": runtime.GOARCH,
-		"CPUs":         fmt.Sprintf("%d", runtime.NumCPU()),
-		"Go Version":   runtime.Version(),
-		"Working Dir":  wd,
-		"User":         os.Getenv("USER"),
-		"Home":         os.Getenv("HOME"),
-		"Shell":        os.Getenv("SHELL"),
-	}
-
-	for key, value := range info {
-		if value != "" {
-			fmt.Printf("%s%-14s%s %s\n", colorYellow, key+":", colorReset, value)
-		}
-	}
+	fmt.Printf("%sHostname:%s     %s\n", colorYellow, colorReset, hostname)
+	fmt.Printf("%sOS:%s           %s/%s\n", colorYellow, colorReset, runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("%sCPUs:%s         %d\n", colorYellow, colorReset, runtime.NumCPU())
+	fmt.Printf("%sWorking Dir:%s  %s\n", colorYellow, colorReset, wd)
+	fmt.Printf("%sUser:%s         %s\n", colorYellow, colorReset, os.Getenv("USER"))
+	fmt.Printf("%sHome:%s         %s\n", colorYellow, colorReset, os.Getenv("HOME"))
 	fmt.Println()
 }
 
 func printIP() {
 	fmt.Printf("%sFetching public IP...%s\n", colorYellow, colorReset)
-
-	services := []string{
-		"https://ifconfig.me",
-		"https://api.ipify.org",
-		"https://icanhazip.com",
+	cmd := exec.Command("curl", "-s", "-m", "5", "https://ifconfig.me")
+	output, err := cmd.Output()
+	if err == nil {
+		fmt.Printf("%sPublic IP:%s %s%s%s\n", colorCyan, colorReset, colorGreen, strings.TrimSpace(string(output)), colorReset)
+	} else {
+		fmt.Printf("%sCould not fetch IP%s\n", colorRed, colorReset)
 	}
-
-	for _, service := range services {
-		cmd := exec.Command("curl", "-s", "-m", "5", service)
-		output, err := cmd.Output()
-		if err == nil {
-			ip := strings.TrimSpace(string(output))
-			if ip != "" {
-				fmt.Printf("%sPublic IP:%s %s%s%s\n", colorCyan, colorReset, colorGreen, ip, colorReset)
-				return
-			}
-		}
-	}
-
-	fmt.Printf("%sCould not fetch public IP%s\n", colorRed, colorReset)
 }
 
 func printTime() {
 	now := time.Now()
-
-	fmt.Println()
-	fmt.Printf("%s[ Current Time ]%s\n", colorCyan, colorReset)
-	fmt.Println(strings.Repeat("─", 40))
-
-	year, week := now.ISOWeek()
-	formats := map[string]string{
-		"Local":       now.Format("2006-01-02 15:04:05"),
-		"UTC":         now.UTC().Format("2006-01-02 15:04:05 MST"),
-		"RFC3339":     now.Format(time.RFC3339),
-		"Unix":        fmt.Sprintf("%d", now.Unix()),
-		"Unix Milli":  fmt.Sprintf("%d", now.UnixMilli()),
-		"ISO Week":    fmt.Sprintf("%d-W%02d", year, week),
-		"Day of Year": fmt.Sprintf("%d", now.YearDay()),
-	}
-
-	for key, value := range formats {
-		fmt.Printf("%s%-12s%s %s\n", colorYellow, key+":", colorReset, value)
-	}
+	fmt.Printf("\n%s[ Current Time ]%s\n", colorCyan, colorReset)
+	fmt.Println(strings.Repeat("-", 40))
+	fmt.Printf("%sLocal:%s    %s\n", colorYellow, colorReset, now.Format("2006-01-02 15:04:05"))
+	fmt.Printf("%sUTC:%s      %s\n", colorYellow, colorReset, now.UTC().Format("2006-01-02 15:04:05"))
+	fmt.Printf("%sUnix:%s     %d\n", colorYellow, colorReset, now.Unix())
 	fmt.Println()
 }
 
 func printEnv() {
-	fmt.Println()
-	fmt.Printf("%s[ Environment Variables ]%s\n", colorCyan, colorReset)
-	fmt.Println(strings.Repeat("─", 40))
-
-	important := []string{"PATH", "HOME", "USER", "SHELL", "LANG", "TERM", "EDITOR", "GOPATH", "GOROOT"}
-
-	for _, key := range important {
-		value := os.Getenv(key)
-		if value != "" {
-			if len(value) > 60 {
-				value = value[:57] + "..."
+	fmt.Printf("\n%s[ Environment ]%s\n", colorCyan, colorReset)
+	fmt.Println(strings.Repeat("-", 40))
+	for _, key := range []string{"PATH", "HOME", "USER", "SHELL", "TERM"} {
+		if v := os.Getenv(key); v != "" {
+			if len(v) > 50 {
+				v = v[:47] + "..."
 			}
-			fmt.Printf("%s%-10s%s %s\n", colorYellow, key+":", colorReset, value)
+			fmt.Printf("%s%s:%s %s\n", colorYellow, key, colorReset, v)
 		}
 	}
-
-	fmt.Printf("\n%sTotal: %d environment variables%s\n", colorCyan, len(os.Environ()), colorReset)
 	fmt.Println()
 }
 
 func printDisk() {
-	fmt.Println()
-	fmt.Printf("%s[ Disk Usage ]%s\n", colorCyan, colorReset)
-	fmt.Println(strings.Repeat("─", 40))
+	fmt.Printf("\n%s[ Disk Usage ]%s\n", colorCyan, colorReset)
+	cmd := exec.Command("df", "-h")
+	output, _ := cmd.Output()
+	fmt.Println(string(output))
+}
 
+// ==================== FILE OPERATIONS ====================
+
+func cmdRead(path string) string {
+	if path == "" {
+		return "Usage: /read <file>"
+	}
+	fullPath := resolvePath(path)
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	content := string(data)
+	lines := strings.Split(content, "\n")
+	if len(lines) > 100 {
+		content = strings.Join(lines[:100], "\n") + fmt.Sprintf("\n... (%d more lines)", len(lines)-100)
+	}
+	return fmt.Sprintf("File: %s\n%s\n%s", fullPath, strings.Repeat("-", 40), content)
+}
+
+func cmdList(path string) string {
+	if path == "" {
+		path = currentDir
+	} else {
+		path = resolvePath(path)
+	}
+	
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("Directory: %s\n%s\n", path, strings.Repeat("-", 40)))
+	
+	for _, entry := range entries {
+		info, _ := entry.Info()
+		if entry.IsDir() {
+			result.WriteString(fmt.Sprintf("%s[DIR]%s  %s/\n", colorBlue, colorReset, entry.Name()))
+		} else {
+			size := ""
+			if info != nil {
+				size = formatSize(info.Size())
+			}
+			result.WriteString(fmt.Sprintf("       %s %s\n", entry.Name(), size))
+		}
+	}
+	return result.String()
+}
+
+func cmdRun(command string) string {
+	if command == "" {
+		return "Usage: /run <command>"
+	}
+	
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("wmic", "logicaldisk", "get", "size,freespace,caption")
+		cmd = exec.Command("cmd", "/C", command)
 	} else {
-		cmd = exec.Command("df", "-h")
+		cmd = exec.Command("sh", "-c", command)
 	}
-
-	output, err := cmd.Output()
+	cmd.Dir = currentDir
+	
+	output, err := cmd.CombinedOutput()
+	result := string(output)
 	if err != nil {
-		fmt.Printf("%sError getting disk info: %s%s\n", colorRed, err, colorReset)
-		return
+		result += fmt.Sprintf("\nExit: %s", err)
 	}
+	return result
+}
 
-	lines := strings.Split(string(output), "\n")
-	for i, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if i == 0 {
-			fmt.Printf("%s%s%s\n", colorYellow, line, colorReset)
-		} else {
-			fmt.Println(line)
-		}
+func cmdCd(path string) string {
+	if path == "" {
+		path = os.Getenv("HOME")
 	}
-	fmt.Println()
+	newPath := resolvePath(path)
+	
+	info, err := os.Stat(newPath)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	if !info.IsDir() {
+		return fmt.Sprintf("Error: %s is not a directory", newPath)
+	}
+	
+	currentDir = newPath
+	return fmt.Sprintf("Changed to: %s", currentDir)
 }
 
-// ==================== MINIMAX CHAT ====================
-
-type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+func cmdEdit(path string, scanner *bufio.Scanner) string {
+	if path == "" {
+		return "Usage: /edit <file>"
+	}
+	fullPath := resolvePath(path)
+	
+	// Read existing content
+	var content string
+	if data, err := os.ReadFile(fullPath); err == nil {
+		content = string(data)
+		fmt.Printf("%sFile exists. Current content:%s\n", colorYellow, colorReset)
+		lines := strings.Split(content, "\n")
+		for i, line := range lines {
+			if i >= 20 {
+				fmt.Printf("%s... (%d more lines)%s\n", colorGray, len(lines)-20, colorReset)
+				break
+			}
+			fmt.Printf("%s%3d:%s %s\n", colorGray, i+1, colorReset, line)
+		}
+	} else {
+		fmt.Printf("%sCreating new file: %s%s\n", colorYellow, fullPath, colorReset)
+	}
+	
+	fmt.Printf("\n%sEnter new content (type '/save' on new line to save, '/cancel' to cancel):%s\n", colorYellow, colorReset)
+	
+	var newContent strings.Builder
+	for {
+		fmt.Printf("%s|%s ", colorGray, colorReset)
+		if !scanner.Scan() {
+			break
+		}
+		line := scanner.Text()
+		if line == "/save" {
+			if err := os.WriteFile(fullPath, []byte(newContent.String()), 0644); err != nil {
+				return fmt.Sprintf("Error saving: %s", err)
+			}
+			return fmt.Sprintf("%sFile saved: %s%s", colorGreen, fullPath, colorReset)
+		}
+		if line == "/cancel" {
+			return "Edit cancelled"
+		}
+		newContent.WriteString(line + "\n")
+	}
+	return "Edit cancelled"
 }
 
-type ChatRequest struct {
-	Model     string        `json:"model"`
-	MaxTokens int           `json:"max_tokens,omitempty"`
-	Messages  []ChatMessage `json:"messages"`
-	Stream    bool          `json:"stream,omitempty"`
+func resolvePath(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		home, _ := os.UserHomeDir()
+		path = filepath.Join(home, path[2:])
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(currentDir, path)
+	}
+	return filepath.Clean(path)
 }
 
-type ChatChoice struct {
-	Message ChatMessage `json:"message"`
+func formatSize(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%dB", size)
+	}
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cB", float64(size)/float64(div), "KMGTPE"[exp])
 }
 
-type ChatResponse struct {
-	Choices []ChatChoice `json:"choices"`
-	Error   *struct {
-		Message string `json:"message"`
-	} `json:"error,omitempty"`
-}
+// ==================== CHAT ====================
 
 func getAPIKey() string {
-	// 1. Check environment variable first
 	if key := os.Getenv("MINIMAX_API_KEY"); key != "" {
 		return key
 	}
-
-	// 2. Check config file ~/.mytool_key
 	home, _ := os.UserHomeDir()
-	configFile := home + "/.mytool_key"
-	if data, err := os.ReadFile(configFile); err == nil {
+	if data, err := os.ReadFile(home + "/.mytool_key"); err == nil {
 		return strings.TrimSpace(string(data))
 	}
-
 	return ""
 }
 
 func saveAPIKey(key string) error {
 	home, _ := os.UserHomeDir()
-	configFile := home + "/.mytool_key"
-	return os.WriteFile(configFile, []byte(key), 0600)
+	return os.WriteFile(home+"/.mytool_key", []byte(key), 0600)
+}
+
+func getSystemPrompt() string {
+	hostname, _ := os.Hostname()
+	return fmt.Sprintf(`Kamu adalah mytool, AI assistant yang berjalan di terminal dengan akses ke sistem.
+
+Info Sistem:
+- Hostname: %s
+- OS: %s/%s
+- User: %s
+- Working Directory: %s
+
+Kamu bisa membantu user dengan:
+- Menjawab pertanyaan programming dan teknis
+- Menjelaskan kode dan konsep
+- Membantu debugging
+- Memberikan saran untuk file dan direktori
+
+User bisa menggunakan command seperti /read, /ls, /edit, /run untuk operasi file.
+Berikan respons yang ringkas dan helpful dalam Bahasa Indonesia jika user berbicara Indonesia.`, 
+		hostname, runtime.GOOS, runtime.GOARCH, os.Getenv("USER"), currentDir)
 }
 
 func runChat(args []string) {
@@ -301,46 +396,46 @@ func runChat(args []string) {
 	if apiKey == "" {
 		fmt.Printf("\n%smytool%s - Setup\n\n", colorGreen, colorReset)
 		fmt.Println("API key belum di-set. Dapatkan di: https://platform.minimax.io/")
-		fmt.Println()
-		fmt.Printf("Masukkan API Key: ")
+		fmt.Printf("\nMasukkan API Key: ")
 		
 		scanner := bufio.NewScanner(os.Stdin)
 		if scanner.Scan() {
 			apiKey = strings.TrimSpace(scanner.Text())
 			if apiKey != "" {
-				if err := saveAPIKey(apiKey); err != nil {
-					fmt.Printf("%sGagal menyimpan: %s%s\n", colorRed, err, colorReset)
-				} else {
-					fmt.Printf("%sAPI key tersimpan di ~/.mytool_key%s\n\n", colorGreen, colorReset)
-				}
+				saveAPIKey(apiKey)
+				fmt.Printf("%sAPI key tersimpan!%s\n\n", colorGreen, colorReset)
 			}
 		}
-		
 		if apiKey == "" {
-			fmt.Printf("%sAPI key tidak boleh kosong%s\n", colorRed, colorReset)
+			fmt.Printf("%sAPI key diperlukan%s\n", colorRed, colorReset)
 			os.Exit(1)
 		}
 	}
 
-	// If message provided as argument, send single message with streaming
+	// Single message mode
 	if len(args) > 0 {
 		message := strings.Join(args, " ")
-		fmt.Printf("%s", colorGreen)
-		_, err := sendMessageStream(apiKey, []ChatMessage{{Role: "user", Content: message}})
-		fmt.Printf("%s\n", colorReset)
-		if err != nil {
-			fmt.Printf("%sError: %s%s\n", colorRed, err, colorReset)
-			os.Exit(1)
+		messages := []ChatMessage{
+			{Role: "system", Content: getSystemPrompt()},
+			{Role: "user", Content: message},
 		}
+		fmt.Printf("%s", colorGreen)
+		sendMessageStream(apiKey, messages)
+		fmt.Printf("%s\n", colorReset)
 		return
 	}
 
 	// Interactive mode
 	fmt.Printf("\n%smytool%s - AI Assistant\n", colorGreen, colorReset)
-	fmt.Printf("%sKetik pertanyaan, 'exit' untuk keluar%s\n\n", colorGray, colorReset)
+	fmt.Printf("%sKetik /help untuk bantuan, 'exit' untuk keluar%s\n", colorGray, colorReset)
+	fmt.Printf("%sDir: %s%s\n\n", colorGray, currentDir, colorReset)
 
-	var history []ChatMessage
+	history := []ChatMessage{
+		{Role: "system", Content: getSystemPrompt()},
+	}
 	scanner := bufio.NewScanner(os.Stdin)
+	// Increase scanner buffer for large inputs
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	for {
 		fmt.Printf("%s> %s", colorYellow, colorReset)
@@ -353,40 +448,81 @@ func runChat(args []string) {
 			continue
 		}
 
-		if input == "exit" || input == "quit" || input == "/exit" || input == "/quit" {
-			fmt.Printf("%sGoodbye!%s\n", colorCyan, colorReset)
+		// Exit commands
+		if input == "exit" || input == "quit" || input == "/exit" {
+			fmt.Printf("%sBye!%s\n", colorCyan, colorReset)
 			break
 		}
 
-		if input == "/clear" {
-			history = nil
-			fmt.Printf("%sConversation cleared.%s\n", colorGray, colorReset)
+		// Handle slash commands
+		if strings.HasPrefix(input, "/") {
+			result := handleCommand(input, scanner)
+			if result != "" {
+				fmt.Println(result)
+				// Add command result to context for AI
+				if !strings.HasPrefix(input, "/help") && !strings.HasPrefix(input, "/clear") {
+					history = append(history, ChatMessage{
+						Role:    "user",
+						Content: fmt.Sprintf("[User executed: %s]\n%s", input, result),
+					})
+				}
+			}
+			fmt.Println()
 			continue
 		}
 
-		if input == "/help" {
-			fmt.Println()
-			fmt.Printf("%sCommands:%s\n", colorYellow, colorReset)
-			fmt.Println("  /clear  - Clear conversation history")
-			fmt.Println("  /help   - Show this help")
-			fmt.Println("  /exit   - Exit chat")
-			fmt.Println()
-			continue
-		}
-
+		// Send to AI
 		history = append(history, ChatMessage{Role: "user", Content: input})
-
+		
 		fmt.Printf("%s", colorGreen)
 		response, err := sendMessageStream(apiKey, history)
 		fmt.Printf("%s", colorReset)
+		
 		if err != nil {
 			fmt.Printf("\n%sError: %s%s\n", colorRed, err, colorReset)
 			history = history[:len(history)-1]
-			continue
+		} else {
+			fmt.Printf("\n\n")
+			history = append(history, ChatMessage{Role: "assistant", Content: response})
 		}
+	}
+}
 
-		fmt.Printf("\n\n")
-		history = append(history, ChatMessage{Role: "assistant", Content: response})
+func handleCommand(input string, scanner *bufio.Scanner) string {
+	parts := strings.SplitN(input, " ", 2)
+	cmd := parts[0]
+	arg := ""
+	if len(parts) > 1 {
+		arg = strings.TrimSpace(parts[1])
+	}
+
+	switch cmd {
+	case "/help":
+		return `Commands:
+  /read <file>   - Baca file
+  /ls [dir]      - List direktori
+  /edit <file>   - Edit file
+  /run <cmd>     - Jalankan command
+  /cd <dir>      - Pindah direktori
+  /pwd           - Direktori saat ini
+  /clear         - Hapus history
+  exit           - Keluar`
+	case "/read", "/cat":
+		return cmdRead(arg)
+	case "/ls", "/dir":
+		return cmdList(arg)
+	case "/run", "/exec", "/$":
+		return cmdRun(arg)
+	case "/cd":
+		return cmdCd(arg)
+	case "/pwd":
+		return fmt.Sprintf("Current directory: %s", currentDir)
+	case "/edit", "/nano", "/vi":
+		return cmdEdit(arg, scanner)
+	case "/clear":
+		return "History cleared"
+	default:
+		return fmt.Sprintf("Unknown command: %s (type /help)", cmd)
 	}
 }
 
@@ -398,16 +534,8 @@ func sendMessageStream(apiKey string, messages []ChatMessage) (string, error) {
 		Stream:    true,
 	}
 
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", minimaxAPIURL, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
+	jsonBody, _ := json.Marshal(reqBody)
+	req, _ := http.NewRequest("POST", minimaxAPIURL, bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "text/event-stream")
@@ -415,13 +543,13 @@ func sendMessageStream(apiKey string, messages []ChatMessage) (string, error) {
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
 	}
 
 	var fullResponse strings.Builder
@@ -430,10 +558,7 @@ func sendMessageStream(apiKey string, messages []ChatMessage) (string, error) {
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return fullResponse.String(), nil
+			break
 		}
 
 		line = strings.TrimSpace(line)
@@ -443,13 +568,8 @@ func sendMessageStream(apiKey string, messages []ChatMessage) (string, error) {
 
 		if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
-			
 			var streamResp StreamResponse
-			if err := json.Unmarshal([]byte(data), &streamResp); err != nil {
-				continue
-			}
-
-			if len(streamResp.Choices) > 0 {
+			if json.Unmarshal([]byte(data), &streamResp) == nil && len(streamResp.Choices) > 0 {
 				content := streamResp.Choices[0].Delta.Content
 				if content != "" {
 					fmt.Print(content)
@@ -460,57 +580,4 @@ func sendMessageStream(apiKey string, messages []ChatMessage) (string, error) {
 	}
 
 	return fullResponse.String(), nil
-}
-
-func sendMessage(apiKey string, messages []ChatMessage) (string, error) {
-	reqBody := ChatRequest{
-		Model:     "MiniMax-Text-01",
-		MaxTokens: 4096,
-		Messages:  messages,
-		Stream:    false,
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", minimaxAPIURL, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	var chatResp ChatResponse
-	if err := json.Unmarshal(body, &chatResp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if chatResp.Error != nil {
-		return "", fmt.Errorf("API error: %s", chatResp.Error.Message)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("empty response from API")
-	}
-
-	return chatResp.Choices[0].Message.Content, nil
 }
