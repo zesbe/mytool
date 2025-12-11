@@ -1720,10 +1720,13 @@ func runChatWithHistory(history []ChatMessage) {
 
 	for {
 		hint := hints[hintIdx%len(hints)]
-		fmt.Printf("%s❯%s %s%s%s", getModeColor(), colorReset, colorGray, hint, colorReset)
-		fmt.Printf("\r%s❯%s ", getModeColor(), colorReset)
+		// White box for input area
+		fmt.Printf("%s┌────────────────────────────────────────────────────────────────┐%s\n", colorWhite, colorReset)
+		fmt.Printf("%s│%s %s❯%s %s%s%s", colorWhite, colorReset, getModeColor(), colorReset, colorGray, hint, colorReset)
+		fmt.Printf("\r%s│%s %s❯%s ", colorWhite, colorReset, getModeColor(), colorReset)
 		
 		input := readMultiLine(scanner)
+		fmt.Printf("%s└────────────────────────────────────────────────────────────────┘%s\n", colorWhite, colorReset)
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
