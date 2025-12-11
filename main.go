@@ -80,9 +80,8 @@ func main() {
 	case "help", "-h", "--help":
 		printHelp()
 	default:
-		fmt.Printf("%sUnknown command: %s%s\n", colorRed, command, colorReset)
-		fmt.Println("Run 'mytool help' for usage.")
-		os.Exit(1)
+		// Treat unknown command as chat message
+		runChat(args)
 	}
 }
 
