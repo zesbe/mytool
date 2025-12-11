@@ -33,6 +33,18 @@ const (
 
 const minimaxAPIURL = "https://api.minimax.io/v1/chat/completions"
 
+// Streaming response structures
+type StreamChoice struct {
+	Delta struct {
+		Content string `json:"content"`
+	} `json:"delta"`
+	FinishReason string `json:"finish_reason"`
+}
+
+type StreamResponse struct {
+	Choices []StreamChoice `json:"choices"`
+}
+
 func main() {
 	args := os.Args[1:]
 
@@ -248,6 +260,7 @@ type ChatRequest struct {
 	Model     string        `json:"model"`
 	MaxTokens int           `json:"max_tokens,omitempty"`
 	Messages  []ChatMessage `json:"messages"`
+	Stream    bool          `json:"stream,omitempty"`
 }
 
 type ChatChoice struct {
@@ -277,15 +290,16 @@ func runChat(args []string) {
 		os.Exit(1)
 	}
 
-	// If message provided as argument, send single message
+	// If message provided as argument, send single message with streaming
 	if len(args) > 0 {
 		message := strings.Join(args, " ")
-		response, err := sendMessage(apiKey, []ChatMessage{{Role: "user", Content: message}})
+		fmt.Printf("%s", colorGreen)
+		_, err := sendMessageStream(apiKey, []ChatMessage{{Role: "user", Content: message}})
+		fmt.Printf("%s\n", colorReset)
 		if err != nil {
 			fmt.Printf("%sError: %s%s\n", colorRed, err, colorReset)
 			os.Exit(1)
 		}
-		fmt.Printf("%s%s%s\n", colorGreen, response, colorReset)
 		return
 	}
 
@@ -334,18 +348,90 @@ func runChat(args []string) {
 
 		history = append(history, ChatMessage{Role: "user", Content: input})
 
-		fmt.Printf("%sAI: %s", colorCyan, colorReset)
-		response, err := sendMessage(apiKey, history)
+		fmt.Printf("%sAI: %s%s", colorCyan, colorReset, colorGreen)
+		response, err := sendMessageStream(apiKey, history)
+		fmt.Printf("%s", colorReset)
 		if err != nil {
-			fmt.Printf("%sError: %s%s\n", colorRed, err, colorReset)
-			// Remove failed message from history
+			fmt.Printf("\n%sError: %s%s\n", colorRed, err, colorReset)
 			history = history[:len(history)-1]
 			continue
 		}
 
-		fmt.Printf("%s%s%s\n\n", colorGreen, response, colorReset)
+		fmt.Printf("\n\n")
 		history = append(history, ChatMessage{Role: "assistant", Content: response})
 	}
+}
+
+func sendMessageStream(apiKey string, messages []ChatMessage) (string, error) {
+	reqBody := ChatRequest{
+		Model:     "MiniMax-Text-01",
+		MaxTokens: 4096,
+		Messages:  messages,
+		Stream:    true,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", minimaxAPIURL, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Accept", "text/event-stream")
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var fullResponse strings.Builder
+	reader := bufio.NewReader(resp.Body)
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fullResponse.String(), nil
+		}
+
+		line = strings.TrimSpace(line)
+		if line == "" || line == "data: [DONE]" {
+			continue
+		}
+
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			
+			var streamResp StreamResponse
+			if err := json.Unmarshal([]byte(data), &streamResp); err != nil {
+				continue
+			}
+
+			if len(streamResp.Choices) > 0 {
+				content := streamResp.Choices[0].Delta.Content
+				if content != "" {
+					fmt.Print(content)
+					fullResponse.WriteString(content)
+				}
+			}
+		}
+	}
+
+	return fullResponse.String(), nil
 }
 
 func sendMessage(apiKey string, messages []ChatMessage) (string, error) {
@@ -353,6 +439,7 @@ func sendMessage(apiKey string, messages []ChatMessage) (string, error) {
 		Model:     "MiniMax-Text-01",
 		MaxTokens: 4096,
 		Messages:  messages,
+		Stream:    false,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
