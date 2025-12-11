@@ -512,6 +512,92 @@ func resolvePath(path string) string {
 	return filepath.Clean(path)
 }
 
+// AI can write/edit files
+func cmdWrite(args string) string {
+	// Format: path|||content
+	parts := strings.SplitN(args, "|||", 2)
+	if len(parts) < 2 {
+		return "Error: format should be path|||content"
+	}
+	
+	path := strings.TrimSpace(parts[0])
+	content := parts[1]
+	
+	if path == "" {
+		return "Error: path required"
+	}
+	
+	fullPath := resolvePath(path)
+	
+	// Create parent directory if needed
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Sprintf("Error creating directory: %s", err)
+	}
+	
+	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+		return fmt.Sprintf("Error writing file: %s", err)
+	}
+	
+	return fmt.Sprintf("File written: %s (%d bytes)", fullPath, len(content))
+}
+
+// AI can append to files
+func cmdAppend(args string) string {
+	parts := strings.SplitN(args, "|||", 2)
+	if len(parts) < 2 {
+		return "Error: format should be path|||content"
+	}
+	
+	path := strings.TrimSpace(parts[0])
+	content := parts[1]
+	fullPath := resolvePath(path)
+	
+	f, err := os.OpenFile(fullPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	defer f.Close()
+	
+	if _, err := f.WriteString(content); err != nil {
+		return fmt.Sprintf("Error appending: %s", err)
+	}
+	
+	return fmt.Sprintf("Appended to: %s", fullPath)
+}
+
+// AI can replace text in files
+func cmdReplace(args string) string {
+	// Format: path|||old|||new
+	parts := strings.SplitN(args, "|||", 3)
+	if len(parts) < 3 {
+		return "Error: format should be path|||old_text|||new_text"
+	}
+	
+	path := strings.TrimSpace(parts[0])
+	oldText := parts[1]
+	newText := parts[2]
+	fullPath := resolvePath(path)
+	
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return fmt.Sprintf("Error reading: %s", err)
+	}
+	
+	content := string(data)
+	if !strings.Contains(content, oldText) {
+		return "Error: old text not found in file"
+	}
+	
+	newContent := strings.Replace(content, oldText, newText, 1)
+	
+	if err := os.WriteFile(fullPath, []byte(newContent), 0644); err != nil {
+		return fmt.Sprintf("Error writing: %s", err)
+	}
+	
+	return fmt.Sprintf("Replaced in: %s", fullPath)
+}
+
 func formatSize(size int64) string {
 	const unit = 1024
 	if size < unit {
@@ -550,8 +636,8 @@ func parseAndExecuteTools(response string) (string, []string) {
 		toolName := strings.TrimSpace(parts[0])
 		toolArg := strings.TrimSpace(parts[1])
 		
-		// Check mode before executing
-		if currentMode == ModeManual && (toolName == "run" || toolName == "write") {
+		// Check mode before executing dangerous operations
+		if currentMode == ModeManual && (toolName == "run" || toolName == "write" || toolName == "append" || toolName == "replace") {
 			toolResults = append(toolResults, fmt.Sprintf("[%s blocked - manual mode]", toolName))
 			response = response[:startIdx] + response[endIdx+7:]
 			continue
@@ -567,6 +653,12 @@ func parseAndExecuteTools(response string) (string, []string) {
 			result = cmdRun(toolArg)
 		case "find":
 			result = cmdFind(toolArg)
+		case "write":
+			result = cmdWrite(toolArg)
+		case "append":
+			result = cmdAppend(toolArg)
+		case "replace":
+			result = cmdReplace(toolArg)
 		case "grep":
 			result = cmdGrep(toolArg)
 		case "tree":
@@ -623,6 +715,9 @@ TOOLS (gunakan format <tool>nama:arg</tool>):
 - <tool>find:nama</tool> - Cari file/folder
 - <tool>grep:pattern:path</tool> - Cari teks
 - <tool>tree:dir</tool> - Struktur folder
+- <tool>write:path|||content</tool> - Tulis/buat file baru
+- <tool>append:path|||content</tool> - Tambah ke akhir file
+- <tool>replace:path|||old|||new</tool> - Ganti teks dalam file
 
 ATURAN:
 1. LANGSUNG gunakan tools saat user minta akses file/folder/command
