@@ -385,8 +385,13 @@ func parseAndExecuteTools(response string) (string, []string) {
 			result = cmdList(toolArg)
 		case "run":
 			result = cmdRun(toolArg)
+		case "find":
+			result = cmdFind(toolArg)
+		case "grep":
+			result = cmdGrep(toolArg)
+		case "tree":
+			result = cmdTree(toolArg)
 		case "write":
-			// Handle write with content
 			result = cmdWriteFile(toolArg, "")
 		default:
 			result = fmt.Sprintf("Unknown tool: %s", toolName)
@@ -410,6 +415,147 @@ func cmdWriteFile(path string, content string) string {
 		return fmt.Sprintf("Error: %s", err)
 	}
 	return fmt.Sprintf("File written: %s", fullPath)
+}
+
+func cmdFind(pattern string) string {
+	if pattern == "" {
+		return "Usage: find <pattern>"
+	}
+	
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/C", "dir", "/s", "/b", "*"+pattern+"*")
+	} else {
+		// Use find command with name pattern
+		cmd = exec.Command("find", currentDir, "-maxdepth", "5", "-name", pattern, "-type", "f", "-o", "-name", pattern, "-type", "d")
+	}
+	cmd.Dir = currentDir
+	
+	output, err := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(output))
+	
+	if result == "" || err != nil {
+		// Try with wildcard
+		cmd = exec.Command("find", currentDir, "-maxdepth", "5", "-iname", "*"+pattern+"*")
+		cmd.Dir = currentDir
+		output, _ = cmd.CombinedOutput()
+		result = strings.TrimSpace(string(output))
+	}
+	
+	if result == "" {
+		return fmt.Sprintf("No files/folders found matching: %s", pattern)
+	}
+	
+	lines := strings.Split(result, "\n")
+	if len(lines) > 50 {
+		result = strings.Join(lines[:50], "\n") + fmt.Sprintf("\n... and %d more", len(lines)-50)
+	}
+	
+	return fmt.Sprintf("Found %d items:\n%s", len(lines), result)
+}
+
+func cmdGrep(args string) string {
+	parts := strings.SplitN(args, ":", 2)
+	if len(parts) < 1 || parts[0] == "" {
+		return "Usage: grep <pattern>:<path>"
+	}
+	
+	pattern := parts[0]
+	searchPath := currentDir
+	if len(parts) > 1 && parts[1] != "" {
+		searchPath = resolvePath(parts[1])
+	}
+	
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("findstr", "/s", "/i", "/n", pattern, searchPath+"\\*")
+	} else {
+		cmd = exec.Command("grep", "-r", "-n", "-i", "--include=*", pattern, searchPath)
+	}
+	
+	output, _ := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(output))
+	
+	if result == "" {
+		return fmt.Sprintf("No matches found for: %s", pattern)
+	}
+	
+	lines := strings.Split(result, "\n")
+	if len(lines) > 30 {
+		result = strings.Join(lines[:30], "\n") + fmt.Sprintf("\n... and %d more matches", len(lines)-30)
+	}
+	
+	return fmt.Sprintf("Found %d matches:\n%s", len(lines), result)
+}
+
+func cmdTree(path string) string {
+	if path == "" {
+		path = currentDir
+	} else {
+		path = resolvePath(path)
+	}
+	
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("%s\n", path))
+	
+	err := walkDir(path, "", &result, 0, 3) // max depth 3
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	
+	return result.String()
+}
+
+func walkDir(path string, prefix string, result *strings.Builder, depth int, maxDepth int) error {
+	if depth >= maxDepth {
+		return nil
+	}
+	
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	
+	// Filter and limit entries
+	var filtered []os.DirEntry
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue // skip hidden
+		}
+		if name == "node_modules" || name == "vendor" || name == ".git" {
+			continue // skip large dirs
+		}
+		filtered = append(filtered, e)
+		if len(filtered) >= 20 {
+			break
+		}
+	}
+	
+	for i, entry := range filtered {
+		isLast := i == len(filtered)-1
+		connector := "├── "
+		if isLast {
+			connector = "└── "
+		}
+		
+		if entry.IsDir() {
+			result.WriteString(fmt.Sprintf("%s%s%s/\n", prefix, connector, entry.Name()))
+			newPrefix := prefix + "│   "
+			if isLast {
+				newPrefix = prefix + "    "
+			}
+			walkDir(filepath.Join(path, entry.Name()), newPrefix, result, depth+1, maxDepth)
+		} else {
+			result.WriteString(fmt.Sprintf("%s%s%s\n", prefix, connector, entry.Name()))
+		}
+	}
+	
+	if len(entries) > len(filtered) {
+		result.WriteString(fmt.Sprintf("%s... (%d more items)\n", prefix, len(entries)-len(filtered)))
+	}
+	
+	return nil
 }
 
 // ==================== CHAT ====================
@@ -446,7 +592,9 @@ Kamu bisa menggunakan tools dengan format <tool>nama:argumen</tool>
 1. <tool>read:path/to/file</tool> - Baca isi file
 2. <tool>ls:path/to/dir</tool> - List direktori (kosongkan untuk current dir)
 3. <tool>run:command</tool> - Jalankan shell command
-4. <tool>write:path/to/file</tool> - Tulis file (konten di baris berikutnya sampai </tool>)
+4. <tool>find:nama_file</tool> - Cari file/folder berdasarkan nama (support wildcard *)
+5. <tool>grep:pattern:path</tool> - Cari teks dalam file (path bisa file atau folder)
+6. <tool>tree:path</tool> - Tampilkan struktur folder
 
 CONTOH PENGGUNAAN:
 - User: "cek isi file config.json"
@@ -455,16 +603,31 @@ CONTOH PENGGUNAAN:
 - User: "list folder src"
   Kamu: <tool>ls:src</tool>
 
-- User: "jalankan npm install"
-  Kamu: <tool>run:npm install</tool>
+- User: "cari file yang namanya ada config"
+  Kamu: <tool>find:*config*</tool>
 
-ATURAN:
-1. Jika user minta lihat/baca file, LANGSUNG gunakan <tool>read:path</tool>
-2. Jika user minta list folder, LANGSUNG gunakan <tool>ls:path</tool>  
-3. Jika user minta jalankan command, LANGSUNG gunakan <tool>run:command</tool>
-4. Setelah tool dieksekusi, kamu akan mendapat hasilnya dan bisa menjelaskan ke user
-5. Berikan respons ringkas dalam Bahasa Indonesia jika user berbicara Indonesia
-6. JANGAN suruh user menjalankan command sendiri - KAMU yang menjalankannya!`, 
+- User: "cari folder node_modules"
+  Kamu: <tool>find:node_modules</tool>
+
+- User: "cari file js di folder src"
+  Kamu: <tool>find:*.js</tool>
+
+- User: "cari kata TODO di semua file"
+  Kamu: <tool>grep:TODO:.</tool>
+
+- User: "tampilkan struktur project"
+  Kamu: <tool>tree:.</tool>
+
+ATURAN PENTING:
+1. Jika user minta CARI/FIND file atau folder, LANGSUNG gunakan <tool>find:nama</tool>
+2. Jika user minta lihat/baca file, LANGSUNG gunakan <tool>read:path</tool>
+3. Jika user minta list folder, LANGSUNG gunakan <tool>ls:path</tool>  
+4. Jika user minta cari teks/kata dalam file, LANGSUNG gunakan <tool>grep:pattern:path</tool>
+5. Jika user minta struktur folder, LANGSUNG gunakan <tool>tree:path</tool>
+6. Setelah tool dieksekusi, kamu akan mendapat hasilnya dan bisa menjelaskan ke user
+7. Berikan respons ringkas dalam Bahasa Indonesia jika user berbicara Indonesia
+8. JANGAN PERNAH suruh user menjalankan command sendiri - KAMU yang menjalankannya!
+9. Jika tidak yakin path-nya, cari dulu dengan find atau ls`, 
 		hostname, runtime.GOOS, runtime.GOARCH, os.Getenv("USER"), currentDir)
 }
 
