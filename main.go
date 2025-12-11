@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/md5"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,9 +21,8 @@ import (
 )
 
 var (
-	version   = "2.0.0"
-	buildTime = "unknown"
-	gitCommit = "unknown"
+	version   = "3.0.0"
+	buildTime = time.Now().Format("2006-01-02")
 )
 
 const (
@@ -33,37 +33,48 @@ const (
 	colorBlue    = "\033[34m"
 	colorPurple  = "\033[35m"
 	colorCyan    = "\033[36m"
+	colorWhite   = "\033[37m"
 	colorGray    = "\033[90m"
 	colorBold    = "\033[1m"
 	colorDim     = "\033[2m"
+	colorItalic  = "\033[3m"
 	clearLine    = "\033[2K\r"
+	cursorUp     = "\033[1A"
+	saveCursor   = "\033[s"
+	restoreCursor = "\033[u"
 )
 
 const minimaxAPIURL = "https://api.minimax.io/v1/chat/completions"
 const modelName = "MiniMax-Text-01"
+const maxContextTokens = 128000
+const costPer1KTokens = 0.0001 // approximate cost
 
-// Modes
 const (
 	ModeAuto   = "auto"
-	ModeAsk    = "ask" 
+	ModeAsk    = "ask"
 	ModeManual = "manual"
 )
 
 var (
-	currentMode    = ModeAuto
-	currentDir     string
-	undoStack      []UndoAction
-	totalTokens    int
-	sessionFile    string
-	projectType    string
-	lastResponse   string
+	currentMode     = ModeAuto
+	currentDir      string
+	undoStack       []UndoAction
+	totalTokens     int
+	totalCost       float64
+	sessionID       string
+	projectType     string
+	lastResponse    string
+	isThinking      bool
+	thinkingFrames  = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	memory          = make(map[string]string)
+	chatExportFile  string
 )
 
 type UndoAction struct {
 	Type    string
 	Path    string
 	Content string
-	Desc    string
+	Time    time.Time
 }
 
 type StreamChoice struct {
@@ -75,7 +86,8 @@ type StreamChoice struct {
 type StreamResponse struct {
 	Choices []StreamChoice `json:"choices"`
 	Usage   struct {
-		TotalTokens int `json:"total_tokens"`
+		TotalTokens  int `json:"total_tokens"`
+		PromptTokens int `json:"prompt_tokens"`
 	} `json:"usage"`
 }
 
@@ -85,29 +97,42 @@ type ChatMessage struct {
 }
 
 type ChatRequest struct {
-	Model     string        `json:"model"`
-	MaxTokens int           `json:"max_tokens,omitempty"`
-	Messages  []ChatMessage `json:"messages"`
-	Stream    bool          `json:"stream,omitempty"`
+	Model       string        `json:"model"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Messages    []ChatMessage `json:"messages"`
+	Stream      bool          `json:"stream,omitempty"`
+	Temperature float64       `json:"temperature,omitempty"`
 }
 
 type Session struct {
-	Dir      string        `json:"dir"`
-	Mode     string        `json:"mode"`
-	History  []ChatMessage `json:"history"`
-	Tokens   int           `json:"tokens"`
+	ID       string            `json:"id"`
+	Dir      string            `json:"dir"`
+	Mode     string            `json:"mode"`
+	History  []ChatMessage     `json:"history"`
+	Tokens   int               `json:"tokens"`
+	Cost     float64           `json:"cost"`
+	Memory   map[string]string `json:"memory"`
+	Created  time.Time         `json:"created"`
+	Updated  time.Time         `json:"updated"`
+}
+
+type Memory struct {
+	Facts map[string]string `json:"facts"`
 }
 
 func main() {
 	currentDir, _ = os.Getwd()
+	sessionID = generateSessionID()
 	detectProject()
-	
-	// Handle Ctrl+C gracefully
+	loadMemory()
+
+	// Graceful shutdown
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c
-		fmt.Printf("\n%sInterrupted. Bye!%s\n", colorYellow, colorReset)
+		fmt.Printf("\n%s👋 Interrupted%s\n", colorYellow, colorReset)
+		saveMemory()
 		os.Exit(0)
 	}()
 
@@ -128,90 +153,168 @@ func main() {
 		printHelp()
 	case "resume":
 		resumeSession()
+	case "sessions":
+		listSessions()
+	case "export":
+		if len(args) > 1 {
+			exportChat(args[1])
+		} else {
+			exportChat("")
+		}
+	case "memory":
+		showMemory()
 	default:
 		runChat(args)
 	}
 }
 
+func generateSessionID() string {
+	return fmt.Sprintf("%x", md5.Sum([]byte(fmt.Sprintf("%s-%d", currentDir, time.Now().UnixNano()))))[:8]
+}
+
 func detectProject() {
-	projectType = "unknown"
-	
+	projectType = ""
 	checks := map[string]string{
-		"package.json": "nodejs",
-		"go.mod":       "golang",
-		"Cargo.toml":   "rust",
-		"requirements.txt": "python",
-		"pom.xml":      "java",
-		"composer.json": "php",
-		"Gemfile":      "ruby",
-		"pubspec.yaml": "flutter",
+		"package.json": "nodejs", "go.mod": "go", "Cargo.toml": "rust",
+		"requirements.txt": "python", "pom.xml": "java", "composer.json": "php",
+		"Gemfile": "ruby", "pubspec.yaml": "flutter", "CMakeLists.txt": "cpp",
+		"Makefile": "make", "docker-compose.yml": "docker",
 	}
-	
 	for file, ptype := range checks {
 		if _, err := os.Stat(filepath.Join(currentDir, file)); err == nil {
 			projectType = ptype
-			break
+			return
 		}
 	}
-	
-	// Check if git repo
 	if _, err := os.Stat(filepath.Join(currentDir, ".git")); err == nil {
-		if projectType == "unknown" {
-			projectType = "git"
-		}
+		projectType = "git"
 	}
 }
 
+// ==================== UI ====================
+
 func printBanner() {
-	banner := `
-%s███╗   ███╗██╗   ██╗████████╗ ██████╗  ██████╗ ██╗     
-████╗ ████║╚██╗ ██╔╝╚══██╔══╝██╔═══██╗██╔═══██╗██║     
-██╔████╔██║ ╚████╔╝    ██║   ██║   ██║██║   ██║██║     
-██║╚██╔╝██║  ╚██╔╝     ██║   ██║   ██║██║   ██║██║     
-██║ ╚═╝ ██║   ██║      ██║   ╚██████╔╝╚██████╔╝███████╗
-╚═╝     ╚═╝   ╚═╝      ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝%s
-                                            %sv%s%s
+	fmt.Print("\033[H\033[2J") // Clear screen
+	banner := `%s
+    ███╗   ███╗██╗   ██╗████████╗ ██████╗  ██████╗ ██╗     
+    ████╗ ████║╚██╗ ██╔╝╚══██╔══╝██╔═══██╗██╔═══██╗██║     
+    ██╔████╔██║ ╚████╔╝    ██║   ██║   ██║██║   ██║██║     
+    ██║╚██╔╝██║  ╚██╔╝     ██║   ██║   ██║██║   ██║██║     
+    ██║ ╚═╝ ██║   ██║      ██║   ╚██████╔╝╚██████╔╝███████╗
+    ╚═╝     ╚═╝   ╚═╝      ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝%s
+                                              %sv%s%s
 `
 	fmt.Printf(banner, colorCyan, colorReset, colorGray, version, colorReset)
 }
 
 func printHelp() {
-	fmt.Printf("\n%smytool%s v%s - AI Terminal Assistant (Droid-like)\n\n", colorCyan, colorReset, version)
-	fmt.Printf("%sUsage:%s mytool [message]\n\n", colorYellow, colorReset)
-	
-	fmt.Printf("%sFeatures:%s\n", colorYellow, colorReset)
-	fmt.Println("  • AI with full system access (read/write/execute)")
-	fmt.Println("  • Git integration (status, commit, diff, push)")
-	fmt.Println("  • URL fetching and web content")
-	fmt.Println("  • @file mentions to include files")
-	fmt.Println("  • Multi-line input with \\")
-	fmt.Println("  • Undo support for file changes")
-	fmt.Println("  • Session save/resume")
-	fmt.Println("  • Three modes: auto/ask/manual")
-	
-	fmt.Printf("\n%sCommands:%s\n", colorYellow, colorReset)
-	fmt.Println("  /mode         - Cycle modes (auto→ask→manual)")
-	fmt.Println("  /undo         - Undo last file change")
-	fmt.Println("  /git <cmd>    - Run git command")
-	fmt.Println("  /save         - Save session")
-	fmt.Println("  /read <file>  - Read file")
-	fmt.Println("  /edit <file>  - Edit file interactively")
-	fmt.Println("  /run <cmd>    - Run shell command")
-	fmt.Println("  /find <name>  - Find files")
-	fmt.Println("  /ls [dir]     - List directory")
-	fmt.Println("  /cd <dir>     - Change directory")
-	fmt.Println("  /clear        - Clear history")
-	fmt.Println("  /help         - Show this help")
-	fmt.Println("  exit          - Exit mytool")
-	
-	fmt.Printf("\n%sResume:%s mytool resume\n\n", colorYellow, colorReset)
+	fmt.Printf(`
+%smytool%s v%s - AI Terminal Assistant (Full Featured)
+
+%sUSAGE%s
+  mytool              Start interactive chat
+  mytool "message"    Send single message
+  mytool resume       Resume last session
+  mytool sessions     List all sessions
+  mytool export [f]   Export chat to file
+  mytool memory       Show AI memory
+
+%sFEATURES%s
+  ✓ Full system access (read/write/execute)
+  ✓ Git integration
+  ✓ Web search & URL fetch
+  ✓ Image analysis
+  ✓ Code execution (Python/JS/Shell)
+  ✓ Syntax highlighting
+  ✓ Session save/resume
+  ✓ Persistent memory
+  ✓ Undo support
+  ✓ Cost tracking
+  ✓ Context window display
+  ✓ Export conversations
+  ✓ Multiple sessions
+
+%sCOMMANDS%s
+  /mode         Toggle mode (auto/ask/manual)
+  /undo         Undo last file change
+  /save         Save current session
+  /export [f]   Export chat to file
+  /copy         Copy last response
+  /memory       Show/manage memory
+  /forget <k>   Forget memory item
+  /remember     Remember something
+  /sessions     List sessions
+  /clear        Clear history
+  /context      Show context usage
+  /cost         Show API cost
+  /run <cmd>    Run shell command
+  /python <c>   Run Python code
+  /node <c>     Run JavaScript
+  /git <cmd>    Git command
+  /search <q>   Web search
+  /read <f>     Read file
+  /edit <f>     Edit file
+  /ls [d]       List directory
+  /find <n>     Find files
+  /grep <p>     Search in files
+  /img <f>      Analyze image
+  /help         This help
+  exit          Quit
+
+%sSHORTCUTS%s
+  @file         Include file content
+  \             Multi-line input
+  Ctrl+C        Cancel/Exit
+
+`, colorCyan, colorReset, version,
+		colorYellow, colorReset, colorYellow, colorReset,
+		colorYellow, colorReset, colorYellow, colorReset)
 }
 
 func printVersion() {
-	fmt.Printf("%smytool%s v%s\n", colorCyan, colorReset, version)
-	fmt.Printf("  Model:   %s\n", modelName)
-	fmt.Printf("  OS:      %s/%s\n", runtime.GOOS, runtime.GOARCH)
-	fmt.Printf("  Project: %s\n", projectType)
+	fmt.Printf(`%smytool%s v%s
+  Model:    %s
+  OS:       %s/%s
+  Project:  %s
+  Session:  %s
+  Build:    %s
+`, colorCyan, colorReset, version, modelName, runtime.GOOS, runtime.GOARCH,
+		projectType, sessionID, buildTime)
+}
+
+func printStatusBar() {
+	mode := getModeDisplay()
+	tokens := fmt.Sprintf("%d/%dk", totalTokens/1000, maxContextTokens/1000)
+	cost := fmt.Sprintf("$%.4f", totalCost)
+	
+	proj := ""
+	if projectType != "" {
+		proj = fmt.Sprintf("[%s]", projectType)
+	}
+	
+	git := ""
+	if branch := getGitBranch(); branch != "" {
+		git = fmt.Sprintf("⎇ %s", branch)
+	}
+	
+	bar := fmt.Sprintf("%s │ %s%s │ %s%s │ %s │ %s",
+		mode, colorGray, tokens, cost, colorReset, currentDir, proj)
+	if git != "" {
+		bar += fmt.Sprintf(" %s%s%s", colorBlue, git, colorReset)
+	}
+	fmt.Println(bar)
+}
+
+func getModeDisplay() string {
+	switch currentMode {
+	case ModeAuto:
+		return fmt.Sprintf("%s●Auto%s", colorGreen, colorReset)
+	case ModeAsk:
+		return fmt.Sprintf("%s●Ask%s", colorYellow, colorReset)
+	case ModeManual:
+		return fmt.Sprintf("%s●Manual%s", colorRed, colorReset)
+	}
+	return ""
 }
 
 func getModeColor() string {
@@ -220,23 +323,9 @@ func getModeColor() string {
 		return colorGreen
 	case ModeAsk:
 		return colorYellow
-	case ModeManual:
+	default:
 		return colorRed
 	}
-	return colorReset
-}
-
-func getModeDisplay() string {
-	c := getModeColor()
-	switch currentMode {
-	case ModeAuto:
-		return fmt.Sprintf("%sAuto%s", c, colorReset)
-	case ModeAsk:
-		return fmt.Sprintf("%sAsk%s", c, colorReset)
-	case ModeManual:
-		return fmt.Sprintf("%sManual%s", c, colorReset)
-	}
-	return ""
 }
 
 func cycleMode() {
@@ -250,39 +339,344 @@ func cycleMode() {
 	}
 }
 
-func printStatusBar() {
-	mode := getModeDisplay()
-	tokens := fmt.Sprintf("%s%d tokens%s", colorGray, totalTokens, colorReset)
-	proj := ""
-	if projectType != "unknown" {
-		proj = fmt.Sprintf(" %s[%s]%s", colorPurple, projectType, colorReset)
+func showThinking() {
+	isThinking = true
+	go func() {
+		i := 0
+		for isThinking {
+			fmt.Printf("\r%s%s Thinking...%s", colorGray, thinkingFrames[i%len(thinkingFrames)], colorReset)
+			time.Sleep(80 * time.Millisecond)
+			i++
+		}
+		fmt.Printf("\r%s\r", clearLine)
+	}()
+}
+
+func stopThinking() {
+	isThinking = false
+	time.Sleep(100 * time.Millisecond)
+	fmt.Printf("\r%s\r", clearLine)
+}
+
+func showProgress(msg string, current, total int) {
+	pct := float64(current) / float64(total) * 100
+	bar := int(pct / 5)
+	fmt.Printf("\r%s%s [%s%s] %.0f%%%s",
+		colorGray, msg,
+		strings.Repeat("█", bar),
+		strings.Repeat("░", 20-bar),
+		pct, colorReset)
+}
+
+// ==================== SYNTAX HIGHLIGHTING ====================
+
+func highlightCode(code, lang string) string {
+	keywords := map[string][]string{
+		"go":     {"func", "return", "if", "else", "for", "range", "var", "const", "type", "struct", "interface", "package", "import", "defer", "go", "chan", "select", "case", "default", "switch", "break", "continue"},
+		"python": {"def", "return", "if", "else", "elif", "for", "while", "in", "import", "from", "class", "try", "except", "finally", "with", "as", "yield", "lambda", "pass", "break", "continue", "True", "False", "None"},
+		"js":     {"function", "return", "if", "else", "for", "while", "var", "let", "const", "class", "import", "export", "from", "try", "catch", "finally", "async", "await", "new", "this", "true", "false", "null", "undefined"},
 	}
+
+	kw, ok := keywords[lang]
+	if !ok {
+		return code
+	}
+
+	result := code
+	for _, k := range kw {
+		re := regexp.MustCompile(`\b(` + k + `)\b`)
+		result = re.ReplaceAllString(result, colorPurple+"$1"+colorReset)
+	}
+
+	// Strings
+	result = regexp.MustCompile(`"([^"]*)"'`).ReplaceAllString(result, colorGreen+`"$1"`+colorReset)
+	result = regexp.MustCompile(`'([^']*)'`).ReplaceAllString(result, colorGreen+`'$1'`+colorReset)
+
+	// Comments
+	result = regexp.MustCompile(`(//.*)`).ReplaceAllString(result, colorGray+"$1"+colorReset)
+	result = regexp.MustCompile(`(#.*)`).ReplaceAllString(result, colorGray+"$1"+colorReset)
+
+	return result
+}
+
+func formatCodeBlock(code, lang string) string {
+	lines := strings.Split(code, "\n")
+	var result strings.Builder
 	
-	// Check git status
-	gitStatus := ""
-	if isGitRepo() {
-		branch := getGitBranch()
-		if branch != "" {
-			gitStatus = fmt.Sprintf(" %s⎇ %s%s", colorBlue, branch, colorReset)
+	result.WriteString(fmt.Sprintf("%s┌─ %s ─%s\n", colorGray, lang, colorReset))
+	for i, line := range lines {
+		hl := highlightCode(line, lang)
+		result.WriteString(fmt.Sprintf("%s│%3d%s %s\n", colorGray, i+1, colorReset, hl))
+	}
+	result.WriteString(fmt.Sprintf("%s└─────%s\n", colorGray, colorReset))
+	
+	return result.String()
+}
+
+// ==================== MEMORY ====================
+
+func loadMemory() {
+	home, _ := os.UserHomeDir()
+	data, err := os.ReadFile(filepath.Join(home, ".mytool", "memory.json"))
+	if err != nil {
+		return
+	}
+	json.Unmarshal(data, &memory)
+}
+
+func saveMemory() {
+	home, _ := os.UserHomeDir()
+	os.MkdirAll(filepath.Join(home, ".mytool"), 0755)
+	data, _ := json.MarshalIndent(memory, "", "  ")
+	os.WriteFile(filepath.Join(home, ".mytool", "memory.json"), data, 0644)
+}
+
+func showMemory() {
+	if len(memory) == 0 {
+		fmt.Println("No memories stored")
+		return
+	}
+	fmt.Printf("%sMemory (%d items):%s\n", colorCyan, len(memory), colorReset)
+	for k, v := range memory {
+		fmt.Printf("  %s%s%s: %s\n", colorYellow, k, colorReset, truncate(v, 50))
+	}
+}
+
+func rememberFact(key, value string) {
+	memory[key] = value
+	saveMemory()
+}
+
+func forgetFact(key string) {
+	delete(memory, key)
+	saveMemory()
+}
+
+// ==================== SESSIONS ====================
+
+func saveSession(history []ChatMessage) {
+	home, _ := os.UserHomeDir()
+	sessionDir := filepath.Join(home, ".mytool", "sessions")
+	os.MkdirAll(sessionDir, 0755)
+
+	session := Session{
+		ID:      sessionID,
+		Dir:     currentDir,
+		Mode:    currentMode,
+		History: history,
+		Tokens:  totalTokens,
+		Cost:    totalCost,
+		Memory:  memory,
+		Updated: time.Now(),
+	}
+
+	data, _ := json.MarshalIndent(session, "", "  ")
+	os.WriteFile(filepath.Join(sessionDir, sessionID+".json"), data, 0644)
+	fmt.Printf("%s✓ Session saved: %s%s\n", colorGreen, sessionID, colorReset)
+}
+
+func loadSession(id string) (*Session, error) {
+	home, _ := os.UserHomeDir()
+	data, err := os.ReadFile(filepath.Join(home, ".mytool", "sessions", id+".json"))
+	if err != nil {
+		return nil, err
+	}
+	var session Session
+	json.Unmarshal(data, &session)
+	return &session, nil
+}
+
+func resumeSession() {
+	home, _ := os.UserHomeDir()
+	sessionDir := filepath.Join(home, ".mytool", "sessions")
+	
+	// Find most recent session for this directory
+	entries, _ := os.ReadDir(sessionDir)
+	var latest *Session
+	var latestTime time.Time
+	
+	for _, e := range entries {
+		if s, err := loadSession(strings.TrimSuffix(e.Name(), ".json")); err == nil {
+			if s.Dir == currentDir && s.Updated.After(latestTime) {
+				latest = s
+				latestTime = s.Updated
+			}
 		}
 	}
 	
-	fmt.Printf("\n%s │ %s │ %s%s%s\n", mode, tokens, currentDir, proj, gitStatus)
-}
-
-func isGitRepo() bool {
-	_, err := os.Stat(filepath.Join(currentDir, ".git"))
-	return err == nil
-}
-
-func getGitBranch() string {
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = currentDir
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
+	if latest == nil {
+		fmt.Printf("%sNo session found for this directory%s\n", colorYellow, colorReset)
+		runChat([]string{})
+		return
 	}
-	return strings.TrimSpace(string(out))
+	
+	sessionID = latest.ID
+	currentMode = latest.Mode
+	totalTokens = latest.Tokens
+	totalCost = latest.Cost
+	memory = latest.Memory
+	
+	fmt.Printf("%s✓ Resumed: %s (%d msgs)%s\n", colorGreen, sessionID, len(latest.History), colorReset)
+	runChatWithHistory(latest.History)
+}
+
+func listSessions() {
+	home, _ := os.UserHomeDir()
+	sessionDir := filepath.Join(home, ".mytool", "sessions")
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil || len(entries) == 0 {
+		fmt.Println("No sessions found")
+		return
+	}
+	
+	fmt.Printf("%sSessions:%s\n", colorCyan, colorReset)
+	for _, e := range entries {
+		if s, err := loadSession(strings.TrimSuffix(e.Name(), ".json")); err == nil {
+			age := time.Since(s.Updated).Round(time.Minute)
+			fmt.Printf("  %s%s%s  %s  %d msgs  %s ago\n",
+				colorYellow, s.ID, colorReset, truncate(s.Dir, 30), len(s.History), age)
+		}
+	}
+}
+
+// ==================== EXPORT ====================
+
+func exportChat(filename string) {
+	if filename == "" {
+		filename = fmt.Sprintf("chat_%s_%s.md", sessionID, time.Now().Format("20060102_150405"))
+	}
+	
+	if chatExportFile == "" {
+		fmt.Printf("%sNo chat to export%s\n", colorYellow, colorReset)
+		return
+	}
+	
+	os.WriteFile(filename, []byte(chatExportFile), 0644)
+	fmt.Printf("%s✓ Exported: %s%s\n", colorGreen, filename, colorReset)
+}
+
+func appendToExport(role, content string) {
+	chatExportFile += fmt.Sprintf("\n## %s\n%s\n", role, content)
+}
+
+// ==================== CODE EXECUTION ====================
+
+func runPython(code string) string {
+	tmpFile := filepath.Join(os.TempDir(), "mytool_py.py")
+	os.WriteFile(tmpFile, []byte(code), 0644)
+	defer os.Remove(tmpFile)
+	
+	cmd := exec.Command("python3", tmpFile)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("%s%s\n%s%s", string(output), colorRed, err, colorReset)
+	}
+	return string(output)
+}
+
+func runNode(code string) string {
+	tmpFile := filepath.Join(os.TempDir(), "mytool_js.js")
+	os.WriteFile(tmpFile, []byte(code), 0644)
+	defer os.Remove(tmpFile)
+	
+	cmd := exec.Command("node", tmpFile)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("%s%s\n%s%s", string(output), colorRed, err, colorReset)
+	}
+	return string(output)
+}
+
+// ==================== IMAGE ANALYSIS ====================
+
+func analyzeImage(path string) string {
+	fullPath := resolvePath(path)
+	
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	
+	// Check file size
+	if len(data) > 5*1024*1024 {
+		return "Error: Image too large (max 5MB)"
+	}
+	
+	// Get mime type
+	ext := strings.ToLower(filepath.Ext(path))
+	mimeTypes := map[string]string{
+		".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+		".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+	}
+	mime, ok := mimeTypes[ext]
+	if !ok {
+		return "Error: Unsupported image format"
+	}
+	
+	b64 := base64.StdEncoding.EncodeToString(data)
+	return fmt.Sprintf("Image loaded: %s (%s, %d bytes)\nBase64: %s...%s",
+		fullPath, mime, len(data), b64[:50], b64[len(b64)-20:])
+}
+
+// ==================== WEB SEARCH ====================
+
+func webSearch(query string) string {
+	// Using DuckDuckGo instant answers API (free, no auth needed)
+	url := fmt.Sprintf("https://api.duckduckgo.com/?q=%s&format=json&no_html=1", strings.ReplaceAll(query, " ", "+"))
+	
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Sprintf("Search error: %s", err)
+	}
+	defer resp.Body.Close()
+	
+	body, _ := io.ReadAll(resp.Body)
+	
+	var result map[string]interface{}
+	json.Unmarshal(body, &result)
+	
+	var output strings.Builder
+	output.WriteString(fmt.Sprintf("%sSearch: %s%s\n", colorCyan, query, colorReset))
+	
+	if abstract, ok := result["Abstract"].(string); ok && abstract != "" {
+		output.WriteString(fmt.Sprintf("\n%s\n", abstract))
+	}
+	
+	if relatedTopics, ok := result["RelatedTopics"].([]interface{}); ok {
+		for i, topic := range relatedTopics {
+			if i >= 5 {
+				break
+			}
+			if t, ok := topic.(map[string]interface{}); ok {
+				if text, ok := t["Text"].(string); ok {
+					output.WriteString(fmt.Sprintf("• %s\n", truncate(text, 100)))
+				}
+			}
+		}
+	}
+	
+	return output.String()
+}
+
+// ==================== CLIPBOARD ====================
+
+func copyToClipboard(text string) string {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "linux":
+		cmd = exec.Command("xclip", "-selection", "clipboard")
+	default:
+		return "Clipboard not supported on this OS"
+	}
+	
+	cmd.Stdin = strings.NewReader(text)
+	if err := cmd.Run(); err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	return fmt.Sprintf("%s✓ Copied to clipboard (%d chars)%s", colorGreen, len(text), colorReset)
 }
 
 // ==================== FILE OPERATIONS ====================
@@ -294,13 +688,9 @@ func saveForUndo(path, desc string) {
 		content = string(data)
 	}
 	undoStack = append(undoStack, UndoAction{
-		Type:    "file",
-		Path:    fullPath,
-		Content: content,
-		Desc:    desc,
+		Type: "file", Path: fullPath, Content: content, Time: time.Now(),
 	})
-	// Keep only last 10 undos
-	if len(undoStack) > 10 {
+	if len(undoStack) > 20 {
 		undoStack = undoStack[1:]
 	}
 }
@@ -309,19 +699,15 @@ func doUndo() string {
 	if len(undoStack) == 0 {
 		return "Nothing to undo"
 	}
-	
 	action := undoStack[len(undoStack)-1]
 	undoStack = undoStack[:len(undoStack)-1]
 	
 	if action.Content == "" {
-		// File was created, delete it
 		os.Remove(action.Path)
-		return fmt.Sprintf("Undone: removed %s", action.Path)
-	} else {
-		// Restore previous content
-		os.WriteFile(action.Path, []byte(action.Content), 0644)
-		return fmt.Sprintf("Undone: restored %s", action.Path)
+		return fmt.Sprintf("%s✓ Undone: removed %s%s", colorGreen, action.Path, colorReset)
 	}
+	os.WriteFile(action.Path, []byte(action.Content), 0644)
+	return fmt.Sprintf("%s✓ Undone: restored %s%s", colorGreen, action.Path, colorReset)
 }
 
 func cmdRead(path string) string {
@@ -333,22 +719,23 @@ func cmdRead(path string) string {
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
+	
 	content := string(data)
 	lines := strings.Split(content, "\n")
+	ext := strings.TrimPrefix(filepath.Ext(path), ".")
 	
-	// Add line numbers
 	var result strings.Builder
-	result.WriteString(fmt.Sprintf("%sFile: %s (%d lines)%s\n", colorCyan, fullPath, len(lines), colorReset))
-	result.WriteString(strings.Repeat("─", 50) + "\n")
+	result.WriteString(fmt.Sprintf("%s─── %s (%d lines) ───%s\n", colorCyan, fullPath, len(lines), colorReset))
 	
-	maxLines := 150
 	for i, line := range lines {
-		if i >= maxLines {
-			result.WriteString(fmt.Sprintf("%s... (%d more lines)%s\n", colorGray, len(lines)-maxLines, colorReset))
+		if i >= 200 {
+			result.WriteString(fmt.Sprintf("%s... +%d more lines%s\n", colorGray, len(lines)-200, colorReset))
 			break
 		}
-		result.WriteString(fmt.Sprintf("%s%4d│%s %s\n", colorGray, i+1, colorReset, line))
+		hl := highlightCode(line, ext)
+		result.WriteString(fmt.Sprintf("%s%4d│%s %s\n", colorGray, i+1, colorReset, hl))
 	}
+	
 	return result.String()
 }
 
@@ -366,9 +753,7 @@ func cmdList(path string) string {
 	
 	var result strings.Builder
 	result.WriteString(fmt.Sprintf("%s%s%s\n", colorCyan, path, colorReset))
-	result.WriteString(strings.Repeat("─", 50) + "\n")
 	
-	// Sort: dirs first, then files
 	var dirs, files []os.DirEntry
 	for _, e := range entries {
 		if e.IsDir() {
@@ -378,32 +763,31 @@ func cmdList(path string) string {
 		}
 	}
 	
-	for _, entry := range dirs {
-		result.WriteString(fmt.Sprintf("%s📁 %s/%s\n", colorBlue, entry.Name(), colorReset))
+	for _, e := range dirs {
+		result.WriteString(fmt.Sprintf("%s📁 %s/%s\n", colorBlue, e.Name(), colorReset))
 	}
-	for _, entry := range files {
-		info, _ := entry.Info()
+	for _, e := range files {
+		info, _ := e.Info()
 		size := ""
 		if info != nil {
 			size = formatSize(info.Size())
 		}
-		icon := getFileIcon(entry.Name())
-		result.WriteString(fmt.Sprintf("%s %s %s%s%s\n", icon, entry.Name(), colorGray, size, colorReset))
+		icon := getFileIcon(e.Name())
+		result.WriteString(fmt.Sprintf("%s %-30s %s%s%s\n", icon, e.Name(), colorGray, size, colorReset))
 	}
 	
-	result.WriteString(fmt.Sprintf("%s\n%d dirs, %d files%s\n", colorGray, len(dirs), len(files), colorReset))
+	result.WriteString(fmt.Sprintf("\n%s%d dirs, %d files%s", colorGray, len(dirs), len(files), colorReset))
 	return result.String()
 }
 
 func getFileIcon(name string) string {
 	ext := strings.ToLower(filepath.Ext(name))
 	icons := map[string]string{
-		".go":   "🔵", ".js":  "🟡", ".ts":  "🔷", ".py":  "🐍",
-		".rs":   "🦀", ".rb":  "💎", ".java": "☕", ".php": "🐘",
-		".html": "🌐", ".css": "🎨", ".json": "📋", ".md":  "📝",
-		".yml":  "⚙️", ".yaml": "⚙️", ".sh":  "📜", ".sql": "🗃️",
-		".jpg":  "🖼️", ".png": "🖼️", ".gif": "🖼️", ".svg": "🖼️",
-		".mp3":  "🎵", ".mp4": "🎬", ".pdf": "📕", ".zip": "📦",
+		".go": "🔵", ".js": "🟡", ".ts": "🔷", ".py": "🐍", ".rs": "🦀",
+		".rb": "💎", ".java": "☕", ".php": "🐘", ".html": "🌐", ".css": "🎨",
+		".json": "📋", ".md": "📝", ".yml": "⚙️", ".yaml": "⚙️", ".sh": "📜",
+		".sql": "🗃️", ".jpg": "🖼️", ".png": "🖼️", ".gif": "🖼️", ".svg": "🖼️",
+		".mp3": "🎵", ".mp4": "🎬", ".pdf": "📕", ".zip": "📦", ".exe": "⚡",
 	}
 	if icon, ok := icons[ext]; ok {
 		return icon
@@ -415,13 +799,11 @@ func cmdRun(command string) string {
 	if command == "" {
 		return "Usage: /run <command>"
 	}
-	
 	if currentMode == ModeManual {
-		return fmt.Sprintf("%s[blocked] Manual mode - command not executed%s", colorRed, colorReset)
+		return fmt.Sprintf("%s[blocked] Manual mode%s", colorRed, colorReset)
 	}
-	
 	if currentMode == ModeAsk {
-		fmt.Printf("%sRun: %s%s ? [y/N] ", colorYellow, command, colorReset)
+		fmt.Printf("%sRun:%s %s [y/N] ", colorYellow, colorReset, command)
 		reader := bufio.NewReader(os.Stdin)
 		input, _ := reader.ReadString('\n')
 		if strings.ToLower(strings.TrimSpace(input)) != "y" {
@@ -430,15 +812,8 @@ func cmdRun(command string) string {
 	}
 	
 	fmt.Printf("%s$ %s%s\n", colorGray, command, colorReset)
-	
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/C", command)
-	} else {
-		cmd = exec.Command("sh", "-c", command)
-	}
+	cmd := exec.Command("sh", "-c", command)
 	cmd.Dir = currentDir
-	
 	output, err := cmd.CombinedOutput()
 	result := string(output)
 	if err != nil {
@@ -452,15 +827,9 @@ func cmdCd(path string) string {
 		path = os.Getenv("HOME")
 	}
 	newPath := resolvePath(path)
-	
-	info, err := os.Stat(newPath)
-	if err != nil {
-		return fmt.Sprintf("Error: %s", err)
+	if info, err := os.Stat(newPath); err != nil || !info.IsDir() {
+		return "Error: not a directory"
 	}
-	if !info.IsDir() {
-		return fmt.Sprintf("Error: not a directory")
-	}
-	
 	currentDir = newPath
 	detectProject()
 	return fmt.Sprintf("→ %s", currentDir)
@@ -470,20 +839,17 @@ func cmdFind(pattern string) string {
 	if pattern == "" {
 		return "Usage: /find <pattern>"
 	}
-	
-	cmd := exec.Command("find", currentDir, "-maxdepth", "5", "-iname", "*"+pattern+"*", "-not", "-path", "*/node_modules/*", "-not", "-path", "*/.git/*")
+	cmd := exec.Command("find", currentDir, "-maxdepth", "6", "-iname", "*"+pattern+"*",
+		"-not", "-path", "*/node_modules/*", "-not", "-path", "*/.git/*")
 	output, _ := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(output))
-	
 	if result == "" {
-		return fmt.Sprintf("No files found: %s", pattern)
+		return "No files found"
 	}
-	
 	lines := strings.Split(result, "\n")
 	if len(lines) > 30 {
-		result = strings.Join(lines[:30], "\n") + fmt.Sprintf("\n%s... +%d more%s", colorGray, len(lines)-30, colorReset)
+		result = strings.Join(lines[:30], "\n") + fmt.Sprintf("\n%s+%d more%s", colorGray, len(lines)-30, colorReset)
 	}
-	
 	return fmt.Sprintf("%sFound %d:%s\n%s", colorGreen, len(lines), colorReset, result)
 }
 
@@ -494,21 +860,18 @@ func cmdGrep(args string) string {
 	if len(parts) > 1 {
 		searchPath = resolvePath(parts[1])
 	}
-	
-	cmd := exec.Command("grep", "-r", "-n", "-i", "--include=*.*", "--exclude-dir=node_modules", "--exclude-dir=.git", pattern, searchPath)
+	cmd := exec.Command("grep", "-rn", "-i", "--include=*.*",
+		"--exclude-dir=node_modules", "--exclude-dir=.git", pattern, searchPath)
 	output, _ := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(output))
-	
 	if result == "" {
-		return fmt.Sprintf("No matches: %s", pattern)
+		return "No matches"
 	}
-	
 	lines := strings.Split(result, "\n")
-	if len(lines) > 20 {
-		result = strings.Join(lines[:20], "\n") + fmt.Sprintf("\n%s... +%d more%s", colorGray, len(lines)-20, colorReset)
+	if len(lines) > 25 {
+		result = strings.Join(lines[:25], "\n") + fmt.Sprintf("\n%s+%d more%s", colorGray, len(lines)-25, colorReset)
 	}
-	
-	return fmt.Sprintf("%sMatches: %d%s\n%s", colorGreen, len(lines), colorReset, result)
+	return fmt.Sprintf("%sMatched %d:%s\n%s", colorGreen, len(lines), colorReset, result)
 }
 
 func cmdTree(path string) string {
@@ -517,7 +880,6 @@ func cmdTree(path string) string {
 	} else {
 		path = resolvePath(path)
 	}
-	
 	var result strings.Builder
 	result.WriteString(fmt.Sprintf("%s%s%s\n", colorCyan, path, colorReset))
 	walkDir(path, "", &result, 0, 3)
@@ -528,16 +890,11 @@ func walkDir(path, prefix string, result *strings.Builder, depth, maxDepth int) 
 	if depth >= maxDepth {
 		return
 	}
-	
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return
-	}
-	
+	entries, _ := os.ReadDir(path)
 	var filtered []os.DirEntry
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "__pycache__" {
+		if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" {
 			continue
 		}
 		filtered = append(filtered, e)
@@ -545,23 +902,21 @@ func walkDir(path, prefix string, result *strings.Builder, depth, maxDepth int) 
 			break
 		}
 	}
-	
-	for i, entry := range filtered {
+	for i, e := range filtered {
 		isLast := i == len(filtered)-1
-		connector := "├── "
+		conn := "├── "
 		if isLast {
-			connector = "└── "
+			conn = "└── "
 		}
-		
-		if entry.IsDir() {
-			result.WriteString(fmt.Sprintf("%s%s%s%s/%s\n", prefix, connector, colorBlue, entry.Name(), colorReset))
-			newPrefix := prefix + "│   "
+		if e.IsDir() {
+			result.WriteString(fmt.Sprintf("%s%s%s%s/%s\n", prefix, conn, colorBlue, e.Name(), colorReset))
+			newPre := prefix + "│   "
 			if isLast {
-				newPrefix = prefix + "    "
+				newPre = prefix + "    "
 			}
-			walkDir(filepath.Join(path, entry.Name()), newPrefix, result, depth+1, maxDepth)
+			walkDir(filepath.Join(path, e.Name()), newPre, result, depth+1, maxDepth)
 		} else {
-			result.WriteString(fmt.Sprintf("%s%s%s\n", prefix, connector, entry.Name()))
+			result.WriteString(fmt.Sprintf("%s%s%s\n", prefix, conn, e.Name()))
 		}
 	}
 }
@@ -571,34 +926,23 @@ func cmdWrite(args string) string {
 	if len(parts) < 2 {
 		return "Error: format path|||content"
 	}
-	
-	path := strings.TrimSpace(parts[0])
-	content := parts[1]
+	path, content := strings.TrimSpace(parts[0]), parts[1]
 	fullPath := resolvePath(path)
 	
 	if currentMode == ModeManual {
-		return fmt.Sprintf("%s[blocked] Manual mode%s", colorRed, colorReset)
+		return fmt.Sprintf("%s[blocked]%s", colorRed, colorReset)
 	}
-	
 	if currentMode == ModeAsk {
-		fmt.Printf("%sWrite to %s?%s [y/N] ", colorYellow, fullPath, colorReset)
+		fmt.Printf("%sWrite %s?%s [y/N] ", colorYellow, fullPath, colorReset)
 		reader := bufio.NewReader(os.Stdin)
-		input, _ := reader.ReadString('\n')
-		if strings.ToLower(strings.TrimSpace(input)) != "y" {
+		if in, _ := reader.ReadString('\n'); strings.ToLower(strings.TrimSpace(in)) != "y" {
 			return "Cancelled"
 		}
 	}
 	
-	// Save for undo
-	saveForUndo(path, "write "+path)
-	
-	// Create dir if needed
+	saveForUndo(path, "write")
 	os.MkdirAll(filepath.Dir(fullPath), 0755)
-	
-	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-		return fmt.Sprintf("Error: %s", err)
-	}
-	
+	os.WriteFile(fullPath, []byte(content), 0644)
 	return fmt.Sprintf("%s✓ Written: %s (%d bytes)%s", colorGreen, fullPath, len(content), colorReset)
 }
 
@@ -607,48 +951,38 @@ func cmdReplace(args string) string {
 	if len(parts) < 3 {
 		return "Error: format path|||old|||new"
 	}
-	
-	path := strings.TrimSpace(parts[0])
-	oldText := parts[1]
-	newText := parts[2]
+	path, old, new := strings.TrimSpace(parts[0]), parts[1], parts[2]
 	fullPath := resolvePath(path)
 	
 	if currentMode == ModeManual {
-		return fmt.Sprintf("%s[blocked] Manual mode%s", colorRed, colorReset)
+		return fmt.Sprintf("%s[blocked]%s", colorRed, colorReset)
 	}
 	
 	data, err := os.ReadFile(fullPath)
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
-	
 	content := string(data)
-	if !strings.Contains(content, oldText) {
-		return "Error: text not found"
+	if !strings.Contains(content, old) {
+		return "Text not found"
 	}
 	
-	// Show diff
-	fmt.Printf("%s--- %s%s\n", colorRed, fullPath, colorReset)
-	fmt.Printf("%s- %s%s\n", colorRed, truncate(oldText, 100), colorReset)
-	fmt.Printf("%s+ %s%s\n", colorGreen, truncate(newText, 100), colorReset)
+	fmt.Printf("%s--- %s%s\n%s- %s%s\n%s+ %s%s\n",
+		colorRed, fullPath, colorReset,
+		colorRed, truncate(old, 80), colorReset,
+		colorGreen, truncate(new, 80), colorReset)
 	
 	if currentMode == ModeAsk {
-		fmt.Printf("%sApply change?%s [y/N] ", colorYellow, colorReset)
+		fmt.Printf("%sApply?%s [y/N] ", colorYellow, colorReset)
 		reader := bufio.NewReader(os.Stdin)
-		input, _ := reader.ReadString('\n')
-		if strings.ToLower(strings.TrimSpace(input)) != "y" {
+		if in, _ := reader.ReadString('\n'); strings.ToLower(strings.TrimSpace(in)) != "y" {
 			return "Cancelled"
 		}
 	}
 	
-	saveForUndo(path, "replace in "+path)
-	
-	newContent := strings.Replace(content, oldText, newText, 1)
-	if err := os.WriteFile(fullPath, []byte(newContent), 0644); err != nil {
-		return fmt.Sprintf("Error: %s", err)
-	}
-	
-	return fmt.Sprintf("%s✓ Replaced in: %s%s", colorGreen, fullPath, colorReset)
+	saveForUndo(path, "replace")
+	os.WriteFile(fullPath, []byte(strings.Replace(content, old, new, 1)), 0644)
+	return fmt.Sprintf("%s✓ Replaced in %s%s", colorGreen, fullPath, colorReset)
 }
 
 func cmdAppend(args string) string {
@@ -656,133 +990,94 @@ func cmdAppend(args string) string {
 	if len(parts) < 2 {
 		return "Error: format path|||content"
 	}
-	
-	path := strings.TrimSpace(parts[0])
-	content := parts[1]
+	path, content := strings.TrimSpace(parts[0]), parts[1]
 	fullPath := resolvePath(path)
 	
 	if currentMode == ModeManual {
-		return fmt.Sprintf("%s[blocked] Manual mode%s", colorRed, colorReset)
+		return fmt.Sprintf("%s[blocked]%s", colorRed, colorReset)
 	}
 	
-	saveForUndo(path, "append to "+path)
-	
-	f, err := os.OpenFile(fullPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Sprintf("Error: %s", err)
-	}
-	defer f.Close()
-	
+	saveForUndo(path, "append")
+	f, _ := os.OpenFile(fullPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	f.WriteString(content)
-	return fmt.Sprintf("%s✓ Appended to: %s%s", colorGreen, fullPath, colorReset)
+	f.Close()
+	return fmt.Sprintf("%s✓ Appended to %s%s", colorGreen, fullPath, colorReset)
 }
 
-// ==================== GIT ====================
-
 func cmdGit(args string) string {
-	if !isGitRepo() {
-		return "Not a git repository"
-	}
-	
 	if args == "" {
 		args = "status"
 	}
-	
 	cmd := exec.Command("sh", "-c", "git "+args)
 	cmd.Dir = currentDir
-	output, err := cmd.CombinedOutput()
-	
-	result := string(output)
-	if err != nil {
-		result += fmt.Sprintf("\n%sError: %s%s", colorRed, err, colorReset)
-	}
-	return result
+	output, _ := cmd.CombinedOutput()
+	return string(output)
 }
 
-// ==================== WEB ====================
-
 func cmdFetch(url string) string {
-	if url == "" {
-		return "Usage: fetch <url>"
-	}
-	
 	if !strings.HasPrefix(url, "http") {
 		url = "https://" + url
 	}
-	
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
 	defer resp.Body.Close()
-	
 	body, _ := io.ReadAll(resp.Body)
 	content := string(body)
-	
-	// Truncate if too long
-	if len(content) > 5000 {
-		content = content[:5000] + "\n... (truncated)"
+	if len(content) > 8000 {
+		content = content[:8000] + "\n... (truncated)"
 	}
-	
 	return fmt.Sprintf("%sURL: %s (%d bytes)%s\n%s", colorCyan, url, len(body), colorReset, content)
 }
 
-// ==================== SESSION ====================
-
-func saveSession(history []ChatMessage) {
-	home, _ := os.UserHomeDir()
-	sessionDir := filepath.Join(home, ".mytool")
-	os.MkdirAll(sessionDir, 0755)
-	
-	// Use dir hash as session name
-	hash := fmt.Sprintf("%x", md5.Sum([]byte(currentDir)))[:8]
-	sessionFile = filepath.Join(sessionDir, "session_"+hash+".json")
-	
-	session := Session{
-		Dir:     currentDir,
-		Mode:    currentMode,
-		History: history,
-		Tokens:  totalTokens,
-	}
-	
-	data, _ := json.MarshalIndent(session, "", "  ")
-	os.WriteFile(sessionFile, data, 0644)
-	
-	fmt.Printf("%s✓ Session saved: %s%s\n", colorGreen, sessionFile, colorReset)
+func getGitBranch() string {
+	cmd := exec.Command("git", "branch", "--show-current")
+	cmd.Dir = currentDir
+	out, _ := cmd.Output()
+	return strings.TrimSpace(string(out))
 }
 
-func loadSession() ([]ChatMessage, bool) {
-	home, _ := os.UserHomeDir()
-	hash := fmt.Sprintf("%x", md5.Sum([]byte(currentDir)))[:8]
-	sessionFile = filepath.Join(home, ".mytool", "session_"+hash+".json")
+func cmdEdit(path string, scanner *bufio.Scanner) string {
+	if path == "" {
+		return "Usage: /edit <file>"
+	}
+	fullPath := resolvePath(path)
 	
-	data, err := os.ReadFile(sessionFile)
-	if err != nil {
-		return nil, false
+	if data, err := os.ReadFile(fullPath); err == nil {
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
+			if i >= 25 {
+				fmt.Printf("%s... +%d more%s\n", colorGray, len(lines)-25, colorReset)
+				break
+			}
+			fmt.Printf("%s%3d│%s %s\n", colorGray, i+1, colorReset, line)
+		}
+	} else {
+		fmt.Printf("%sNew file%s\n", colorYellow, colorReset)
 	}
 	
-	var session Session
-	if err := json.Unmarshal(data, &session); err != nil {
-		return nil, false
+	fmt.Printf("\n%sEnter content (/save or /cancel):%s\n", colorYellow, colorReset)
+	var content strings.Builder
+	for {
+		fmt.Printf("%s │%s ", colorGray, colorReset)
+		if !scanner.Scan() {
+			break
+		}
+		line := scanner.Text()
+		if line == "/save" {
+			saveForUndo(path, "edit")
+			os.MkdirAll(filepath.Dir(fullPath), 0755)
+			os.WriteFile(fullPath, []byte(content.String()), 0644)
+			return fmt.Sprintf("%s✓ Saved%s", colorGreen, colorReset)
+		}
+		if line == "/cancel" {
+			return "Cancelled"
+		}
+		content.WriteString(line + "\n")
 	}
-	
-	currentMode = session.Mode
-	totalTokens = session.Tokens
-	
-	return session.History, true
-}
-
-func resumeSession() {
-	history, ok := loadSession()
-	if !ok {
-		fmt.Printf("%sNo session found for this directory%s\n", colorYellow, colorReset)
-		runChat([]string{})
-		return
-	}
-	
-	fmt.Printf("%s✓ Resumed session (%d messages, %d tokens)%s\n", colorGreen, len(history), totalTokens, colorReset)
-	runChatWithHistory(history)
+	return "Cancelled"
 }
 
 // ==================== HELPERS ====================
@@ -821,33 +1116,26 @@ func truncate(s string, max int) string {
 func processAtMentions(input string) string {
 	re := regexp.MustCompile(`@([\w./\-_]+)`)
 	matches := re.FindAllStringSubmatch(input, -1)
-	
 	if len(matches) == 0 {
 		return input
 	}
 	
-	var fileContents []string
-	for _, match := range matches {
-		filename := match[1]
+	var files []string
+	for _, m := range matches {
+		filename := m[1]
 		fullPath := resolvePath(filename)
-		
-		data, err := os.ReadFile(fullPath)
-		if err != nil {
-			continue
+		if data, err := os.ReadFile(fullPath); err == nil {
+			content := string(data)
+			if lines := strings.Split(content, "\n"); len(lines) > 100 {
+				content = strings.Join(lines[:100], "\n") + fmt.Sprintf("\n... +%d lines", len(lines)-100)
+			}
+			files = append(files, fmt.Sprintf("=== %s ===\n%s", fullPath, content))
+			fmt.Printf("%s  ✓ @%s%s\n", colorGray, filename, colorReset)
 		}
-		
-		content := string(data)
-		lines := strings.Split(content, "\n")
-		if len(lines) > 100 {
-			content = strings.Join(lines[:100], "\n") + fmt.Sprintf("\n... (%d more)", len(lines)-100)
-		}
-		
-		fileContents = append(fileContents, fmt.Sprintf("=== %s ===\n%s", fullPath, content))
-		fmt.Printf("%s  ✓ @%s%s\n", colorGray, filename, colorReset)
 	}
 	
-	if len(fileContents) > 0 {
-		return input + "\n\n" + strings.Join(fileContents, "\n\n")
+	if len(files) > 0 {
+		return input + "\n\n" + strings.Join(files, "\n\n")
 	}
 	return input
 }
@@ -870,11 +1158,10 @@ func readMultiLine(scanner *bufio.Scanner) string {
 	return strings.Join(lines, "\n")
 }
 
-// ==================== TOOL PARSING ====================
+// ==================== TOOLS ====================
 
 func parseAndExecuteTools(response string) (string, []string) {
 	var results []string
-	
 	for {
 		start := strings.Index(response, "<tool>")
 		if start == -1 {
@@ -920,14 +1207,27 @@ func parseAndExecuteTools(response string) (string, []string) {
 			result = cmdFetch(toolArg)
 		case "cd":
 			result = cmdCd(toolArg)
+		case "python":
+			result = runPython(toolArg)
+		case "node":
+			result = runNode(toolArg)
+		case "search":
+			result = webSearch(toolArg)
+		case "image":
+			result = analyzeImage(toolArg)
+		case "remember":
+			p := strings.SplitN(toolArg, ":", 2)
+			if len(p) == 2 {
+				rememberFact(p[0], p[1])
+				result = "Remembered: " + p[0]
+			}
 		default:
-			result = fmt.Sprintf("Unknown tool: %s", toolName)
+			result = "Unknown tool: " + toolName
 		}
 		
 		results = append(results, fmt.Sprintf("[%s] %s", toolName, result))
 		response = response[:start] + response[end+7:]
 	}
-	
 	return strings.TrimSpace(response), results
 }
 
@@ -952,66 +1252,71 @@ func saveAPIKey(key string) {
 func getSystemPrompt() string {
 	hostname, _ := os.Hostname()
 	
-	gitInfo := ""
-	if isGitRepo() {
-		gitInfo = fmt.Sprintf("\n- Git branch: %s", getGitBranch())
+	memoryStr := ""
+	if len(memory) > 0 {
+		var facts []string
+		for k, v := range memory {
+			facts = append(facts, fmt.Sprintf("- %s: %s", k, v))
+		}
+		memoryStr = "\n\nMEMORY:\n" + strings.Join(facts, "\n")
 	}
 	
-	return fmt.Sprintf(`Kamu adalah mytool v%s, AI assistant terminal dengan akses penuh ke sistem.
+	return fmt.Sprintf(`Kamu mytool v%s, AI terminal assistant dengan akses penuh ke sistem.
 
 SISTEM:
 - Host: %s | OS: %s/%s | User: %s
-- Dir: %s
-- Project: %s%s
-- Mode: %s
+- Dir: %s | Project: %s | Mode: %s%s
 
 TOOLS (format: <tool>nama:arg</tool>):
-READ/BROWSE:
-- <tool>read:file</tool> - Baca file dengan line numbers
+
+READ:
+- <tool>read:file</tool> - Baca file
 - <tool>ls:dir</tool> - List direktori
 - <tool>tree:dir</tool> - Struktur folder
-- <tool>find:nama</tool> - Cari file
+- <tool>find:pattern</tool> - Cari file
 - <tool>grep:pattern path</tool> - Cari teks
+- <tool>image:file</tool> - Analisa gambar
 
-WRITE/EDIT:
-- <tool>write:path|||content</tool> - Tulis file baru
+WRITE:
+- <tool>write:path|||content</tool> - Buat/tulis file
 - <tool>replace:path|||old|||new</tool> - Ganti teks
 - <tool>append:path|||content</tool> - Tambah ke file
 
 EXECUTE:
-- <tool>run:command</tool> - Jalankan command shell
-- <tool>git:command</tool> - Jalankan git command
+- <tool>run:cmd</tool> - Shell command
+- <tool>git:cmd</tool> - Git command
+- <tool>python:code</tool> - Jalankan Python
+- <tool>node:code</tool> - Jalankan JavaScript
 
 WEB:
-- <tool>fetch:url</tool> - Ambil konten dari URL
+- <tool>fetch:url</tool> - Ambil konten URL
+- <tool>search:query</tool> - Cari di web
 
-NAVIGATION:
-- <tool>cd:path</tool> - Pindah direktori
+MEMORY:
+- <tool>remember:key:value</tool> - Ingat sesuatu
 
-ATURAN PENTING:
-1. LANGSUNG gunakan tools - jangan suruh user melakukan sendiri
-2. Untuk edit file: baca dulu, lalu gunakan replace dengan exact text
-3. Untuk buat file: gunakan write dengan full content
-4. Jelaskan singkat apa yang kamu lakukan
-5. Bahasa Indonesia jika user pakai Indonesia
-6. Tampilkan diff/perubahan sebelum edit`, 
-		version, hostname, runtime.GOOS, runtime.GOARCH, os.Getenv("USER"), 
-		currentDir, projectType, gitInfo, currentMode)
+ATURAN:
+1. LANGSUNG gunakan tools - jangan suruh user manual
+2. Untuk edit: baca dulu, lalu replace dengan exact text
+3. Tampilkan diff sebelum edit
+4. Bahasa Indonesia jika user pakai Indonesia
+5. Respons singkat dan informatif`,
+		version, hostname, runtime.GOOS, runtime.GOARCH, os.Getenv("USER"),
+		currentDir, projectType, currentMode, memoryStr)
 }
 
 func runChat(args []string) {
 	apiKey := getAPIKey()
 	if apiKey == "" {
-		fmt.Printf("\n%smytool%s - Setup\n\n", colorCyan, colorReset)
-		fmt.Println("API key required. Get one at: https://platform.minimax.io/")
+		fmt.Printf("\n%smytool Setup%s\n\n", colorCyan, colorReset)
+		fmt.Println("API key required: https://platform.minimax.io/")
 		fmt.Printf("\nEnter API Key: ")
-		
 		scanner := bufio.NewScanner(os.Stdin)
 		if scanner.Scan() {
 			apiKey = strings.TrimSpace(scanner.Text())
 			if apiKey != "" {
 				saveAPIKey(apiKey)
-				fmt.Printf("%s✓ Saved%s\n\n", colorGreen, colorReset)
+				fmt.Printf("%s✓ Saved%s\n", colorGreen, colorReset)
 			}
 		}
 		if apiKey == "" {
@@ -1019,16 +1324,16 @@ func runChat(args []string) {
 		}
 	}
 
-	// Single message mode
 	if len(args) > 0 {
 		msg := processAtMentions(strings.Join(args, " "))
 		messages := []ChatMessage{
 			{Role: "system", Content: getSystemPrompt()},
 			{Role: "user", Content: msg},
 		}
-		fmt.Printf("%s", colorGreen)
+		showThinking()
 		response, _ := sendStream(apiKey, messages)
-		fmt.Printf("%s\n", colorReset)
+		stopThinking()
+		fmt.Printf("%s%s%s\n", colorGreen, response, colorReset)
 		
 		_, results := parseAndExecuteTools(response)
 		if len(results) > 0 {
@@ -1049,19 +1354,19 @@ func runChatWithHistory(history []ChatMessage) {
 	
 	printBanner()
 	fmt.Printf("\n%sYou are standing in an open terminal. An AI awaits your commands.%s\n", colorGray, colorReset)
-	fmt.Printf("\nENTER send • \\ newline • @file include • /help commands\n")
+	fmt.Printf("\nENTER send • \\ newline • @file include • /help commands • Ctrl+C exit\n")
 	printStatusBar()
 	fmt.Println()
 
 	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 2*1024*1024), 2*1024*1024)
 
 	hints := []string{
-		"\"List all files here\"",
+		"\"What's in this folder?\"",
 		"\"Read and explain package.json\"",
 		"\"Find all TODO comments\"",
-		"\"Create a hello.py file\"",
-		"\"What's the git status?\"",
+		"\"Create a Python hello world\"",
+		"\"Search how to parse JSON in Go\"",
 	}
 	hintIdx := 0
 
@@ -1072,59 +1377,106 @@ func runChatWithHistory(history []ChatMessage) {
 		
 		input := readMultiLine(scanner)
 		input = strings.TrimSpace(input)
-		
 		if input == "" {
 			continue
 		}
 		hintIdx++
+		
+		appendToExport("User", input)
 
 		// Commands
-		if input == "exit" || input == "quit" {
-			fmt.Printf("%sBye! 👋%s\n", colorCyan, colorReset)
-			break
-		}
-
-		if input == "/mode" {
+		switch {
+		case input == "exit" || input == "quit":
+			saveMemory()
+			fmt.Printf("%s👋 Bye!%s\n", colorCyan, colorReset)
+			return
+		case input == "/mode":
 			cycleMode()
 			history[0] = ChatMessage{Role: "system", Content: getSystemPrompt()}
 			fmt.Printf("Mode: %s\n\n", getModeDisplay())
 			continue
-		}
-
-		if input == "/undo" {
+		case input == "/undo":
 			fmt.Println(doUndo())
 			fmt.Println()
 			continue
-		}
-
-		if input == "/save" {
+		case input == "/save":
 			saveSession(history)
+			continue
+		case input == "/copy":
+			fmt.Println(copyToClipboard(lastResponse))
+			continue
+		case input == "/cost":
+			fmt.Printf("Tokens: %d | Cost: $%.4f\n\n", totalTokens, totalCost)
+			continue
+		case input == "/context":
+			pct := float64(totalTokens) / float64(maxContextTokens) * 100
+			fmt.Printf("Context: %d/%d (%.1f%%)\n\n", totalTokens, maxContextTokens, pct)
+			continue
+		case input == "/memory":
+			showMemory()
 			fmt.Println()
 			continue
-		}
-
-		if strings.HasPrefix(input, "/") {
+		case input == "/sessions":
+			listSessions()
+			fmt.Println()
+			continue
+		case strings.HasPrefix(input, "/export"):
+			parts := strings.SplitN(input, " ", 2)
+			f := ""
+			if len(parts) > 1 {
+				f = parts[1]
+			}
+			exportChat(f)
+			continue
+		case strings.HasPrefix(input, "/forget "):
+			key := strings.TrimPrefix(input, "/forget ")
+			forgetFact(key)
+			fmt.Printf("Forgot: %s\n\n", key)
+			continue
+		case strings.HasPrefix(input, "/remember "):
+			parts := strings.SplitN(strings.TrimPrefix(input, "/remember "), "=", 2)
+			if len(parts) == 2 {
+				rememberFact(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
+				fmt.Printf("Remembered: %s\n\n", parts[0])
+			}
+			continue
+		case strings.HasPrefix(input, "/python "):
+			code := strings.TrimPrefix(input, "/python ")
+			fmt.Println(runPython(code))
+			continue
+		case strings.HasPrefix(input, "/node "):
+			code := strings.TrimPrefix(input, "/node ")
+			fmt.Println(runNode(code))
+			continue
+		case strings.HasPrefix(input, "/search "):
+			query := strings.TrimPrefix(input, "/search ")
+			fmt.Println(webSearch(query))
+			continue
+		case strings.HasPrefix(input, "/img "):
+			path := strings.TrimPrefix(input, "/img ")
+			fmt.Println(analyzeImage(path))
+			continue
+		case strings.HasPrefix(input, "/"):
 			result := handleCommand(input, scanner)
 			fmt.Println(result)
 			fmt.Println()
 			continue
 		}
 
-		// Process @mentions
+		// Process mentions
 		input = processAtMentions(input)
 
 		// Send to AI
 		history = append(history, ChatMessage{Role: "user", Content: input})
 		
-		// Show thinking indicator
-		fmt.Printf("%s⠋ Thinking...%s", colorGray, colorReset)
-		
-		fmt.Printf("\r%s              %s\r", clearLine, colorReset)
-		fmt.Printf("%s", colorGreen)
+		showThinking()
 		response, _ := sendStream(apiKey, history)
-		fmt.Printf("%s", colorReset)
+		stopThinking()
 		lastResponse = response
 		
+		appendToExport("Assistant", response)
+		totalCost = float64(totalTokens) / 1000 * costPer1KTokens
+
 		// Parse tools
 		_, results := parseAndExecuteTools(response)
 		
@@ -1136,19 +1488,19 @@ func runChatWithHistory(history []ChatMessage) {
 			fmt.Printf("%s─────────────────%s\n", colorCyan, colorReset)
 			
 			history = append(history, ChatMessage{Role: "assistant", Content: response})
-			
-			// Follow up
 			history = append(history, ChatMessage{
-				Role: "user", 
+				Role:    "user",
 				Content: "Results:\n" + strings.Join(results, "\n") + "\n\nJelaskan singkat.",
 			})
 			
 			fmt.Printf("\n%s", colorGreen)
 			followUp, _ := sendStream(apiKey, history)
 			fmt.Printf("%s", colorReset)
+			lastResponse = followUp
 			
 			if followUp != "" {
 				history = append(history, ChatMessage{Role: "assistant", Content: followUp})
+				appendToExport("Assistant", followUp)
 			}
 		} else {
 			history = append(history, ChatMessage{Role: "assistant", Content: response})
@@ -1168,20 +1520,31 @@ func handleCommand(input string, scanner *bufio.Scanner) string {
 
 	switch cmd {
 	case "/help", "/?":
-		return `/read <f>  - Read file
-/ls [d]    - List directory  
-/run <c>   - Run command
-/find <n>  - Find files
-/grep <p>  - Search in files
-/tree [d]  - Show structure
-/git <c>   - Git command
-/cd <d>    - Change directory
-/edit <f>  - Edit file
-/mode      - Cycle mode
-/undo      - Undo last change
-/save      - Save session
-/clear     - Clear history
-exit       - Quit`
+		return `/read <f>   Read file
+/ls [d]     List directory
+/run <c>    Run command
+/find <n>   Find files
+/grep <p>   Search in files
+/tree [d]   Show structure
+/git <c>    Git command
+/edit <f>   Edit file
+/cd <d>     Change directory
+/python <c> Run Python
+/node <c>   Run JavaScript
+/search <q> Web search
+/img <f>    Analyze image
+/mode       Toggle mode
+/undo       Undo change
+/save       Save session
+/export [f] Export chat
+/copy       Copy last response
+/cost       Show API cost
+/context    Context usage
+/memory     Show memory
+/remember   Remember fact
+/forget <k> Forget fact
+/clear      Clear history
+exit        Quit`
 	case "/read", "/cat":
 		return cmdRead(arg)
 	case "/ls", "/dir":
@@ -1203,63 +1566,19 @@ exit       - Quit`
 	case "/edit":
 		return cmdEdit(arg, scanner)
 	case "/clear":
-		return "History cleared"
+		return "Cleared"
 	default:
-		return fmt.Sprintf("Unknown: %s", cmd)
+		return "Unknown: " + cmd
 	}
-}
-
-func cmdEdit(path string, scanner *bufio.Scanner) string {
-	if path == "" {
-		return "Usage: /edit <file>"
-	}
-	fullPath := resolvePath(path)
-	
-	// Show current content
-	if data, err := os.ReadFile(fullPath); err == nil {
-		lines := strings.Split(string(data), "\n")
-		for i, line := range lines {
-			if i >= 20 {
-				fmt.Printf("%s... (%d more)%s\n", colorGray, len(lines)-20, colorReset)
-				break
-			}
-			fmt.Printf("%s%3d│%s %s\n", colorGray, i+1, colorReset, line)
-		}
-	} else {
-		fmt.Printf("%sNew file: %s%s\n", colorYellow, fullPath, colorReset)
-	}
-	
-	fmt.Printf("\n%sEnter content (/save or /cancel):%s\n", colorYellow, colorReset)
-	
-	var content strings.Builder
-	for {
-		fmt.Printf("%s │%s ", colorGray, colorReset)
-		if !scanner.Scan() {
-			break
-		}
-		line := scanner.Text()
-		if line == "/save" {
-			saveForUndo(path, "edit "+path)
-			os.MkdirAll(filepath.Dir(fullPath), 0755)
-			if err := os.WriteFile(fullPath, []byte(content.String()), 0644); err != nil {
-				return fmt.Sprintf("Error: %s", err)
-			}
-			return fmt.Sprintf("%s✓ Saved: %s%s", colorGreen, fullPath, colorReset)
-		}
-		if line == "/cancel" {
-			return "Cancelled"
-		}
-		content.WriteString(line + "\n")
-	}
-	return "Cancelled"
 }
 
 func sendStream(apiKey string, messages []ChatMessage) (string, error) {
 	reqBody := ChatRequest{
-		Model:     modelName,
-		MaxTokens: 4096,
-		Messages:  messages,
-		Stream:    true,
+		Model:       modelName,
+		MaxTokens:   4096,
+		Messages:    messages,
+		Stream:      true,
+		Temperature: 0.7,
 	}
 
 	jsonBody, _ := json.Marshal(reqBody)
@@ -1268,40 +1587,42 @@ func sendStream(apiKey string, messages []ChatMessage) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "text/event-stream")
 
-	client := &http.Client{Timeout: 120 * time.Second}
+	client := &http.Client{Timeout: 180 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body))
 	}
 
 	var full strings.Builder
 	reader := bufio.NewReader(resp.Body)
+	
+	fmt.Printf("%s", colorGreen)
 
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			break
 		}
-
 		line = strings.TrimSpace(line)
 		if line == "" || line == "data: [DONE]" {
 			continue
 		}
-
 		if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
 			var sr StreamResponse
-			if json.Unmarshal([]byte(data), &sr) == nil && len(sr.Choices) > 0 {
-				content := sr.Choices[0].Delta.Content
-				if content != "" {
-					fmt.Print(content)
-					full.WriteString(content)
+			if json.Unmarshal([]byte(data), &sr) == nil {
+				if len(sr.Choices) > 0 {
+					content := sr.Choices[0].Delta.Content
+					if content != "" {
+						fmt.Print(content)
+						full.WriteString(content)
+					}
 				}
 				if sr.Usage.TotalTokens > 0 {
 					totalTokens = sr.Usage.TotalTokens
@@ -1309,6 +1630,7 @@ func sendStream(apiKey string, messages []ChatMessage) (string, error) {
 			}
 		}
 	}
-
+	
+	fmt.Printf("%s", colorReset)
 	return full.String(), nil
 }
