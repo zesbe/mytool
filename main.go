@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -30,15 +31,26 @@ const (
 	colorPurple = "\033[35m"
 	colorCyan   = "\033[36m"
 	colorGray   = "\033[90m"
+	colorBold   = "\033[1m"
 )
 
 const minimaxAPIURL = "https://api.minimax.io/v1/chat/completions"
+const modelName = "MiniMax-Text-01"
+
+// Modes
+const (
+	ModeAuto   = "auto"
+	ModeAsk    = "ask"
+	ModeManual = "manual"
+)
+
+var currentMode = ModeAuto
+var currentDir string
 
 type StreamChoice struct {
 	Delta struct {
 		Content string `json:"content"`
 	} `json:"delta"`
-	FinishReason string `json:"finish_reason"`
 }
 
 type StreamResponse struct {
@@ -68,8 +80,6 @@ type ChatResponse struct {
 	} `json:"error,omitempty"`
 }
 
-var currentDir string
-
 func main() {
 	currentDir, _ = os.Getwd()
 	args := os.Args[1:]
@@ -89,22 +99,12 @@ func main() {
 	switch command {
 	case "version", "-v", "--version":
 		printVersion()
-	case "info", "sysinfo":
+	case "info":
 		printSystemInfo()
-	case "ip":
-		printIP()
-	case "time":
-		printTime()
-	case "env":
-		printEnv()
-	case "disk":
-		printDisk()
-	case "chat", "ai":
-		runChat(cmdArgs)
 	case "help", "-h", "--help":
 		printHelp()
 	default:
-		runChat(args)
+		runChat(append([]string{command}, cmdArgs...))
 	}
 }
 
@@ -116,95 +116,142 @@ func printBanner() {
 ██║╚██╔╝██║  ╚██╔╝     ██║   ██║   ██║██║   ██║██║     
 ██║ ╚═╝ ██║   ██║      ██║   ╚██████╔╝╚██████╔╝███████╗
 ╚═╝     ╚═╝   ╚═╝      ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝%s
-                              %sv%s%s
+                                            %sv%s%s
 `
 	fmt.Printf(banner, colorCyan, colorReset, colorGray, version, colorReset)
 }
 
 func printHelp() {
-	fmt.Printf("\n%smytool%s v%s - AI Assistant dengan akses sistem\n\n", colorGreen, colorReset, version)
-	fmt.Printf("%sUsage:%s mytool [command]\n\n", colorYellow, colorReset)
+	fmt.Printf("\n%smytool%s v%s - AI Terminal Assistant\n\n", colorGreen, colorReset, version)
+	fmt.Printf("%sUsage:%s mytool [message]\n\n", colorYellow, colorReset)
 	fmt.Printf("%sCommands:%s\n", colorYellow, colorReset)
-	fmt.Println("  (tanpa args)  Masuk mode chat interaktif")
-	fmt.Println("  \"pesan\"       Kirim pesan langsung ke AI")
-	fmt.Println("  help          Tampilkan bantuan ini")
-	fmt.Println("  version       Tampilkan versi")
-	fmt.Println("  info          Info sistem")
-	fmt.Printf("\n%sChat Commands:%s\n", colorYellow, colorReset)
-	fmt.Println("  /read <file>      Baca isi file")
-	fmt.Println("  /ls [dir]         List direktori")
-	fmt.Println("  /edit <file>      Edit file (interactive)")
-	fmt.Println("  /run <cmd>        Jalankan command")
-	fmt.Println("  /cd <dir>         Pindah direktori")
-	fmt.Println("  /pwd              Tampilkan direktori saat ini")
-	fmt.Println("  /clear            Hapus history chat")
-	fmt.Println("  /help             Tampilkan bantuan")
-	fmt.Println("  exit              Keluar")
+	fmt.Println("  (no args)     Start interactive chat")
+	fmt.Println("  \"message\"     Send single message to AI")
+	fmt.Println("  help          Show this help")
+	fmt.Println("  version       Show version")
+	fmt.Printf("\n%sChat Features:%s\n", colorYellow, colorReset)
+	fmt.Println("  @filename     Mention file to include its content")
+	fmt.Println("  \\             Continue input on next line")
+	fmt.Println("  /mode         Cycle through modes (auto/ask/manual)")
+	fmt.Println("  /read <file>  Read file content")
+	fmt.Println("  /ls [dir]     List directory")
+	fmt.Println("  /run <cmd>    Execute command")
+	fmt.Println("  /find <name>  Search files")
+	fmt.Println("  /cd <dir>     Change directory")
+	fmt.Println("  /clear        Clear chat history")
+	fmt.Println("  exit          Exit mytool")
 	fmt.Println()
 }
 
 func printVersion() {
-	fmt.Printf("%smytool%s version %s%s%s\n", colorCyan, colorReset, colorGreen, version, colorReset)
-	fmt.Printf("  Build time: %s\n", buildTime)
-	fmt.Printf("  Git commit: %s\n", gitCommit)
-	fmt.Printf("  Go version: %s\n", runtime.Version())
-	fmt.Printf("  OS/Arch:    %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("%smytool%s v%s\n", colorCyan, colorReset, version)
+	fmt.Printf("  Model: %s\n", modelName)
+	fmt.Printf("  OS:    %s/%s\n", runtime.GOOS, runtime.GOARCH)
 }
 
 func printSystemInfo() {
-	fmt.Printf("\n%s[ System Information ]%s\n", colorCyan, colorReset)
-	fmt.Println(strings.Repeat("-", 40))
 	hostname, _ := os.Hostname()
-	wd, _ := os.Getwd()
-	fmt.Printf("%sHostname:%s     %s\n", colorYellow, colorReset, hostname)
-	fmt.Printf("%sOS:%s           %s/%s\n", colorYellow, colorReset, runtime.GOOS, runtime.GOARCH)
-	fmt.Printf("%sCPUs:%s         %d\n", colorYellow, colorReset, runtime.NumCPU())
-	fmt.Printf("%sWorking Dir:%s  %s\n", colorYellow, colorReset, wd)
-	fmt.Printf("%sUser:%s         %s\n", colorYellow, colorReset, os.Getenv("USER"))
-	fmt.Printf("%sHome:%s         %s\n", colorYellow, colorReset, os.Getenv("HOME"))
+	fmt.Printf("\n%sSystem Info%s\n", colorCyan, colorReset)
+	fmt.Printf("  Hostname: %s\n", hostname)
+	fmt.Printf("  OS:       %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("  CPUs:     %d\n", runtime.NumCPU())
+	fmt.Printf("  Dir:      %s\n", currentDir)
 	fmt.Println()
 }
 
-func printIP() {
-	fmt.Printf("%sFetching public IP...%s\n", colorYellow, colorReset)
-	cmd := exec.Command("curl", "-s", "-m", "5", "https://ifconfig.me")
-	output, err := cmd.Output()
-	if err == nil {
-		fmt.Printf("%sPublic IP:%s %s%s%s\n", colorCyan, colorReset, colorGreen, strings.TrimSpace(string(output)), colorReset)
-	} else {
-		fmt.Printf("%sCould not fetch IP%s\n", colorRed, colorReset)
+func getModeDisplay() string {
+	switch currentMode {
+	case ModeAuto:
+		return fmt.Sprintf("%sAuto%s %s(allow all)%s", colorGreen, colorReset, colorGray, colorReset)
+	case ModeAsk:
+		return fmt.Sprintf("%sAsk%s %s(confirm actions)%s", colorYellow, colorReset, colorGray, colorReset)
+	case ModeManual:
+		return fmt.Sprintf("%sManual%s %s(no auto actions)%s", colorRed, colorReset, colorGray, colorReset)
+	}
+	return ""
+}
+
+func cycleMode() {
+	switch currentMode {
+	case ModeAuto:
+		currentMode = ModeAsk
+	case ModeAsk:
+		currentMode = ModeManual
+	case ModeManual:
+		currentMode = ModeAuto
 	}
 }
 
-func printTime() {
-	now := time.Now()
-	fmt.Printf("\n%s[ Current Time ]%s\n", colorCyan, colorReset)
-	fmt.Println(strings.Repeat("-", 40))
-	fmt.Printf("%sLocal:%s    %s\n", colorYellow, colorReset, now.Format("2006-01-02 15:04:05"))
-	fmt.Printf("%sUTC:%s      %s\n", colorYellow, colorReset, now.UTC().Format("2006-01-02 15:04:05"))
-	fmt.Printf("%sUnix:%s     %d\n", colorYellow, colorReset, now.Unix())
-	fmt.Println()
+func printStatusBar() {
+	mode := getModeDisplay()
+	model := fmt.Sprintf("%s%s%s", colorPurple, modelName, colorReset)
+	fmt.Printf("\n%s • %s                    %sCurrent folder:%s %s\n", mode, model, colorGray, colorReset, currentDir)
 }
 
-func printEnv() {
-	fmt.Printf("\n%s[ Environment ]%s\n", colorCyan, colorReset)
-	fmt.Println(strings.Repeat("-", 40))
-	for _, key := range []string{"PATH", "HOME", "USER", "SHELL", "TERM"} {
-		if v := os.Getenv(key); v != "" {
-			if len(v) > 50 {
-				v = v[:47] + "..."
-			}
-			fmt.Printf("%s%s:%s %s\n", colorYellow, key, colorReset, v)
+// Process @mentions in input - replace @filename with file content
+func processAtMentions(input string) string {
+	re := regexp.MustCompile(`@([\w./\-_]+)`)
+	matches := re.FindAllStringSubmatch(input, -1)
+	
+	if len(matches) == 0 {
+		return input
+	}
+	
+	result := input
+	var fileContents []string
+	
+	for _, match := range matches {
+		filename := match[1]
+		fullPath := resolvePath(filename)
+		
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			fileContents = append(fileContents, fmt.Sprintf("[Error reading %s: %s]", filename, err))
+			continue
 		}
+		
+		content := string(data)
+		// Truncate if too long
+		lines := strings.Split(content, "\n")
+		if len(lines) > 100 {
+			content = strings.Join(lines[:100], "\n") + fmt.Sprintf("\n... (%d more lines)", len(lines)-100)
+		}
+		
+		fileContents = append(fileContents, fmt.Sprintf("=== File: %s ===\n%s\n=== End: %s ===", fullPath, content, filename))
+		
+		// Show that file was loaded
+		fmt.Printf("%s  ✓ Loaded: %s%s\n", colorGray, fullPath, colorReset)
 	}
-	fmt.Println()
+	
+	if len(fileContents) > 0 {
+		result = result + "\n\n" + strings.Join(fileContents, "\n\n")
+	}
+	
+	return result
 }
 
-func printDisk() {
-	fmt.Printf("\n%s[ Disk Usage ]%s\n", colorCyan, colorReset)
-	cmd := exec.Command("df", "-h")
-	output, _ := cmd.Output()
-	fmt.Println(string(output))
+// Read multi-line input (lines ending with \ continue)
+func readMultiLineInput(scanner *bufio.Scanner) string {
+	var lines []string
+	
+	for {
+		if !scanner.Scan() {
+			break
+		}
+		line := scanner.Text()
+		
+		if strings.HasSuffix(line, "\\") {
+			// Continue to next line
+			lines = append(lines, strings.TrimSuffix(line, "\\"))
+			fmt.Printf("%s. %s", colorGray, colorReset)
+			continue
+		}
+		
+		lines = append(lines, line)
+		break
+	}
+	
+	return strings.Join(lines, "\n")
 }
 
 // ==================== FILE OPERATIONS ====================
@@ -261,6 +308,11 @@ func cmdRun(command string) string {
 		return "Usage: /run <command>"
 	}
 	
+	// Check mode
+	if currentMode == ModeManual {
+		return "Manual mode: command execution disabled. Use /mode to change."
+	}
+	
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("cmd", "/C", command)
@@ -295,32 +347,140 @@ func cmdCd(path string) string {
 	return fmt.Sprintf("Changed to: %s", currentDir)
 }
 
+func cmdFind(pattern string) string {
+	if pattern == "" {
+		return "Usage: /find <pattern>"
+	}
+	
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/C", "dir", "/s", "/b", "*"+pattern+"*")
+	} else {
+		cmd = exec.Command("find", currentDir, "-maxdepth", "5", "-iname", "*"+pattern+"*")
+	}
+	cmd.Dir = currentDir
+	
+	output, _ := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(output))
+	
+	if result == "" {
+		return fmt.Sprintf("No files found matching: %s", pattern)
+	}
+	
+	lines := strings.Split(result, "\n")
+	if len(lines) > 30 {
+		result = strings.Join(lines[:30], "\n") + fmt.Sprintf("\n... and %d more", len(lines)-30)
+	}
+	
+	return fmt.Sprintf("Found %d items:\n%s", len(lines), result)
+}
+
+func cmdGrep(args string) string {
+	parts := strings.SplitN(args, ":", 2)
+	if len(parts) < 1 || parts[0] == "" {
+		return "Usage: /grep <pattern>:<path>"
+	}
+	
+	pattern := parts[0]
+	searchPath := currentDir
+	if len(parts) > 1 && parts[1] != "" {
+		searchPath = resolvePath(parts[1])
+	}
+	
+	cmd := exec.Command("grep", "-r", "-n", "-i", "--include=*", pattern, searchPath)
+	output, _ := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(output))
+	
+	if result == "" {
+		return fmt.Sprintf("No matches found for: %s", pattern)
+	}
+	
+	lines := strings.Split(result, "\n")
+	if len(lines) > 20 {
+		result = strings.Join(lines[:20], "\n") + fmt.Sprintf("\n... and %d more", len(lines)-20)
+	}
+	
+	return fmt.Sprintf("Found %d matches:\n%s", len(lines), result)
+}
+
+func cmdTree(path string) string {
+	if path == "" {
+		path = currentDir
+	} else {
+		path = resolvePath(path)
+	}
+	
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("%s\n", path))
+	walkDir(path, "", &result, 0, 3)
+	return result.String()
+}
+
+func walkDir(path string, prefix string, result *strings.Builder, depth int, maxDepth int) {
+	if depth >= maxDepth {
+		return
+	}
+	
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return
+	}
+	
+	var filtered []os.DirEntry
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" {
+			continue
+		}
+		filtered = append(filtered, e)
+		if len(filtered) >= 15 {
+			break
+		}
+	}
+	
+	for i, entry := range filtered {
+		isLast := i == len(filtered)-1
+		connector := "├── "
+		if isLast {
+			connector = "└── "
+		}
+		
+		if entry.IsDir() {
+			result.WriteString(fmt.Sprintf("%s%s%s/\n", prefix, connector, entry.Name()))
+			newPrefix := prefix + "│   "
+			if isLast {
+				newPrefix = prefix + "    "
+			}
+			walkDir(filepath.Join(path, entry.Name()), newPrefix, result, depth+1, maxDepth)
+		} else {
+			result.WriteString(fmt.Sprintf("%s%s%s\n", prefix, connector, entry.Name()))
+		}
+	}
+}
+
 func cmdEdit(path string, scanner *bufio.Scanner) string {
 	if path == "" {
 		return "Usage: /edit <file>"
 	}
 	fullPath := resolvePath(path)
 	
-	// Read existing content
-	var content string
 	if data, err := os.ReadFile(fullPath); err == nil {
-		content = string(data)
-		fmt.Printf("%sFile exists. Current content:%s\n", colorYellow, colorReset)
-		lines := strings.Split(content, "\n")
+		fmt.Printf("%sFile exists:%s\n", colorYellow, colorReset)
+		lines := strings.Split(string(data), "\n")
 		for i, line := range lines {
-			if i >= 20 {
-				fmt.Printf("%s... (%d more lines)%s\n", colorGray, len(lines)-20, colorReset)
+			if i >= 15 {
+				fmt.Printf("%s... (%d more lines)%s\n", colorGray, len(lines)-15, colorReset)
 				break
 			}
 			fmt.Printf("%s%3d:%s %s\n", colorGray, i+1, colorReset, line)
 		}
 	} else {
-		fmt.Printf("%sCreating new file: %s%s\n", colorYellow, fullPath, colorReset)
+		fmt.Printf("%sNew file: %s%s\n", colorYellow, fullPath, colorReset)
 	}
 	
-	fmt.Printf("\n%sEnter new content (type '/save' on new line to save, '/cancel' to cancel):%s\n", colorYellow, colorReset)
+	fmt.Printf("\n%sEnter content (/save to save, /cancel to cancel):%s\n", colorYellow, colorReset)
 	
-	var newContent strings.Builder
+	var content strings.Builder
 	for {
 		fmt.Printf("%s|%s ", colorGray, colorReset)
 		if !scanner.Scan() {
@@ -328,17 +488,17 @@ func cmdEdit(path string, scanner *bufio.Scanner) string {
 		}
 		line := scanner.Text()
 		if line == "/save" {
-			if err := os.WriteFile(fullPath, []byte(newContent.String()), 0644); err != nil {
-				return fmt.Sprintf("Error saving: %s", err)
+			if err := os.WriteFile(fullPath, []byte(content.String()), 0644); err != nil {
+				return fmt.Sprintf("Error: %s", err)
 			}
-			return fmt.Sprintf("%sFile saved: %s%s", colorGreen, fullPath, colorReset)
+			return fmt.Sprintf("%sSaved: %s%s", colorGreen, fullPath, colorReset)
 		}
 		if line == "/cancel" {
-			return "Edit cancelled"
+			return "Cancelled"
 		}
-		newContent.WriteString(line + "\n")
+		content.WriteString(line + "\n")
 	}
-	return "Edit cancelled"
+	return "Cancelled"
 }
 
 func resolvePath(path string) string {
@@ -365,11 +525,11 @@ func formatSize(size int64) string {
 	return fmt.Sprintf("%.1f%cB", float64(size)/float64(div), "KMGTPE"[exp])
 }
 
-// Parse and execute tool calls from AI response
+// ==================== TOOL EXECUTION ====================
+
 func parseAndExecuteTools(response string) (string, []string) {
 	var toolResults []string
 	
-	// Find all <tool>...</tool> patterns
 	for {
 		startIdx := strings.Index(response, "<tool>")
 		if startIdx == -1 {
@@ -390,6 +550,13 @@ func parseAndExecuteTools(response string) (string, []string) {
 		toolName := strings.TrimSpace(parts[0])
 		toolArg := strings.TrimSpace(parts[1])
 		
+		// Check mode before executing
+		if currentMode == ModeManual && (toolName == "run" || toolName == "write") {
+			toolResults = append(toolResults, fmt.Sprintf("[%s blocked - manual mode]", toolName))
+			response = response[:startIdx] + response[endIdx+7:]
+			continue
+		}
+		
 		var result string
 		switch toolName {
 		case "read":
@@ -404,171 +571,15 @@ func parseAndExecuteTools(response string) (string, []string) {
 			result = cmdGrep(toolArg)
 		case "tree":
 			result = cmdTree(toolArg)
-		case "write":
-			result = cmdWriteFile(toolArg, "")
 		default:
 			result = fmt.Sprintf("Unknown tool: %s", toolName)
 		}
 		
 		toolResults = append(toolResults, fmt.Sprintf("[%s:%s]\n%s", toolName, toolArg, result))
-		
-		// Remove the tool tag from response for display
 		response = response[:startIdx] + response[endIdx+7:]
 	}
 	
 	return strings.TrimSpace(response), toolResults
-}
-
-func cmdWriteFile(path string, content string) string {
-	if path == "" {
-		return "Error: path required"
-	}
-	fullPath := resolvePath(path)
-	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-		return fmt.Sprintf("Error: %s", err)
-	}
-	return fmt.Sprintf("File written: %s", fullPath)
-}
-
-func cmdFind(pattern string) string {
-	if pattern == "" {
-		return "Usage: find <pattern>"
-	}
-	
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/C", "dir", "/s", "/b", "*"+pattern+"*")
-	} else {
-		// Use find command with name pattern
-		cmd = exec.Command("find", currentDir, "-maxdepth", "5", "-name", pattern, "-type", "f", "-o", "-name", pattern, "-type", "d")
-	}
-	cmd.Dir = currentDir
-	
-	output, err := cmd.CombinedOutput()
-	result := strings.TrimSpace(string(output))
-	
-	if result == "" || err != nil {
-		// Try with wildcard
-		cmd = exec.Command("find", currentDir, "-maxdepth", "5", "-iname", "*"+pattern+"*")
-		cmd.Dir = currentDir
-		output, _ = cmd.CombinedOutput()
-		result = strings.TrimSpace(string(output))
-	}
-	
-	if result == "" {
-		return fmt.Sprintf("No files/folders found matching: %s", pattern)
-	}
-	
-	lines := strings.Split(result, "\n")
-	if len(lines) > 50 {
-		result = strings.Join(lines[:50], "\n") + fmt.Sprintf("\n... and %d more", len(lines)-50)
-	}
-	
-	return fmt.Sprintf("Found %d items:\n%s", len(lines), result)
-}
-
-func cmdGrep(args string) string {
-	parts := strings.SplitN(args, ":", 2)
-	if len(parts) < 1 || parts[0] == "" {
-		return "Usage: grep <pattern>:<path>"
-	}
-	
-	pattern := parts[0]
-	searchPath := currentDir
-	if len(parts) > 1 && parts[1] != "" {
-		searchPath = resolvePath(parts[1])
-	}
-	
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("findstr", "/s", "/i", "/n", pattern, searchPath+"\\*")
-	} else {
-		cmd = exec.Command("grep", "-r", "-n", "-i", "--include=*", pattern, searchPath)
-	}
-	
-	output, _ := cmd.CombinedOutput()
-	result := strings.TrimSpace(string(output))
-	
-	if result == "" {
-		return fmt.Sprintf("No matches found for: %s", pattern)
-	}
-	
-	lines := strings.Split(result, "\n")
-	if len(lines) > 30 {
-		result = strings.Join(lines[:30], "\n") + fmt.Sprintf("\n... and %d more matches", len(lines)-30)
-	}
-	
-	return fmt.Sprintf("Found %d matches:\n%s", len(lines), result)
-}
-
-func cmdTree(path string) string {
-	if path == "" {
-		path = currentDir
-	} else {
-		path = resolvePath(path)
-	}
-	
-	var result strings.Builder
-	result.WriteString(fmt.Sprintf("%s\n", path))
-	
-	err := walkDir(path, "", &result, 0, 3) // max depth 3
-	if err != nil {
-		return fmt.Sprintf("Error: %s", err)
-	}
-	
-	return result.String()
-}
-
-func walkDir(path string, prefix string, result *strings.Builder, depth int, maxDepth int) error {
-	if depth >= maxDepth {
-		return nil
-	}
-	
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return err
-	}
-	
-	// Filter and limit entries
-	var filtered []os.DirEntry
-	for _, e := range entries {
-		name := e.Name()
-		if strings.HasPrefix(name, ".") {
-			continue // skip hidden
-		}
-		if name == "node_modules" || name == "vendor" || name == ".git" {
-			continue // skip large dirs
-		}
-		filtered = append(filtered, e)
-		if len(filtered) >= 20 {
-			break
-		}
-	}
-	
-	for i, entry := range filtered {
-		isLast := i == len(filtered)-1
-		connector := "├── "
-		if isLast {
-			connector = "└── "
-		}
-		
-		if entry.IsDir() {
-			result.WriteString(fmt.Sprintf("%s%s%s/\n", prefix, connector, entry.Name()))
-			newPrefix := prefix + "│   "
-			if isLast {
-				newPrefix = prefix + "    "
-			}
-			walkDir(filepath.Join(path, entry.Name()), newPrefix, result, depth+1, maxDepth)
-		} else {
-			result.WriteString(fmt.Sprintf("%s%s%s\n", prefix, connector, entry.Name()))
-		}
-	}
-	
-	if len(entries) > len(filtered) {
-		result.WriteString(fmt.Sprintf("%s... (%d more items)\n", prefix, len(entries)-len(filtered)))
-	}
-	
-	return nil
 }
 
 // ==================== CHAT ====================
@@ -591,141 +602,140 @@ func saveAPIKey(key string) error {
 
 func getSystemPrompt() string {
 	hostname, _ := os.Hostname()
-	return fmt.Sprintf(`Kamu adalah mytool, AI assistant yang berjalan di terminal dengan akses penuh ke sistem.
+	modeDesc := "auto - dapat menjalankan semua tools"
+	if currentMode == ModeAsk {
+		modeDesc = "ask - konfirmasi sebelum menjalankan"
+	} else if currentMode == ModeManual {
+		modeDesc = "manual - tidak menjalankan tools otomatis"
+	}
+	
+	return fmt.Sprintf(`Kamu adalah mytool, AI assistant di terminal dengan akses sistem.
 
-Info Sistem:
-- Hostname: %s
-- OS: %s/%s  
-- User: %s
-- Working Directory: %s
+SISTEM:
+- Host: %s | OS: %s/%s | User: %s
+- Dir: %s
+- Mode: %s
 
-TOOLS YANG TERSEDIA:
-Kamu bisa menggunakan tools dengan format <tool>nama:argumen</tool>
+TOOLS (gunakan format <tool>nama:arg</tool>):
+- <tool>read:file</tool> - Baca file
+- <tool>ls:dir</tool> - List direktori  
+- <tool>run:cmd</tool> - Jalankan command
+- <tool>find:nama</tool> - Cari file/folder
+- <tool>grep:pattern:path</tool> - Cari teks
+- <tool>tree:dir</tool> - Struktur folder
 
-1. <tool>read:path/to/file</tool> - Baca isi file
-2. <tool>ls:path/to/dir</tool> - List direktori (kosongkan untuk current dir)
-3. <tool>run:command</tool> - Jalankan shell command
-4. <tool>find:nama_file</tool> - Cari file/folder berdasarkan nama (support wildcard *)
-5. <tool>grep:pattern:path</tool> - Cari teks dalam file (path bisa file atau folder)
-6. <tool>tree:path</tool> - Tampilkan struktur folder
-
-CONTOH PENGGUNAAN:
-- User: "cek isi file config.json"
-  Kamu: <tool>read:config.json</tool>
-  
-- User: "list folder src"
-  Kamu: <tool>ls:src</tool>
-
-- User: "cari file yang namanya ada config"
-  Kamu: <tool>find:*config*</tool>
-
-- User: "cari folder node_modules"
-  Kamu: <tool>find:node_modules</tool>
-
-- User: "cari file js di folder src"
-  Kamu: <tool>find:*.js</tool>
-
-- User: "cari kata TODO di semua file"
-  Kamu: <tool>grep:TODO:.</tool>
-
-- User: "tampilkan struktur project"
-  Kamu: <tool>tree:.</tool>
-
-ATURAN PENTING:
-1. Jika user minta CARI/FIND file atau folder, LANGSUNG gunakan <tool>find:nama</tool>
-2. Jika user minta lihat/baca file, LANGSUNG gunakan <tool>read:path</tool>
-3. Jika user minta list folder, LANGSUNG gunakan <tool>ls:path</tool>  
-4. Jika user minta cari teks/kata dalam file, LANGSUNG gunakan <tool>grep:pattern:path</tool>
-5. Jika user minta struktur folder, LANGSUNG gunakan <tool>tree:path</tool>
-6. Setelah tool dieksekusi, kamu akan mendapat hasilnya dan bisa menjelaskan ke user
-7. Berikan respons ringkas dalam Bahasa Indonesia jika user berbicara Indonesia
-8. JANGAN PERNAH suruh user menjalankan command sendiri - KAMU yang menjalankannya!
-9. Jika tidak yakin path-nya, cari dulu dengan find atau ls`, 
-		hostname, runtime.GOOS, runtime.GOARCH, os.Getenv("USER"), currentDir)
+ATURAN:
+1. LANGSUNG gunakan tools saat user minta akses file/folder/command
+2. Jangan suruh user melakukan sendiri - KAMU yang lakukan
+3. Respons singkat dan informatif
+4. Bahasa Indonesia jika user pakai Indonesia`, 
+		hostname, runtime.GOOS, runtime.GOARCH, os.Getenv("USER"), currentDir, modeDesc)
 }
 
 func runChat(args []string) {
 	apiKey := getAPIKey()
 	if apiKey == "" {
 		fmt.Printf("\n%smytool%s - Setup\n\n", colorGreen, colorReset)
-		fmt.Println("API key belum di-set. Dapatkan di: https://platform.minimax.io/")
-		fmt.Printf("\nMasukkan API Key: ")
+		fmt.Println("API key required. Get one at: https://platform.minimax.io/")
+		fmt.Printf("\nEnter API Key: ")
 		
 		scanner := bufio.NewScanner(os.Stdin)
 		if scanner.Scan() {
 			apiKey = strings.TrimSpace(scanner.Text())
 			if apiKey != "" {
 				saveAPIKey(apiKey)
-				fmt.Printf("%sAPI key tersimpan!%s\n\n", colorGreen, colorReset)
+				fmt.Printf("%sAPI key saved!%s\n\n", colorGreen, colorReset)
 			}
 		}
 		if apiKey == "" {
-			fmt.Printf("%sAPI key diperlukan%s\n", colorRed, colorReset)
+			fmt.Printf("%sAPI key required%s\n", colorRed, colorReset)
 			os.Exit(1)
 		}
 	}
 
 	// Single message mode
 	if len(args) > 0 {
-		message := strings.Join(args, " ")
+		message := processAtMentions(strings.Join(args, " "))
 		messages := []ChatMessage{
 			{Role: "system", Content: getSystemPrompt()},
 			{Role: "user", Content: message},
 		}
 		fmt.Printf("%s", colorGreen)
-		sendMessageStream(apiKey, messages)
+		response, _ := sendMessageStream(apiKey, messages)
 		fmt.Printf("%s\n", colorReset)
+		
+		// Handle tool calls
+		_, toolResults := parseAndExecuteTools(response)
+		if len(toolResults) > 0 {
+			fmt.Printf("\n%s--- Tools ---%s\n", colorCyan, colorReset)
+			for _, r := range toolResults {
+				fmt.Printf("%s%s%s\n", colorGray, r, colorReset)
+			}
+		}
 		return
 	}
 
-	// Interactive mode - Show banner
+	// Interactive mode
 	printBanner()
-	fmt.Printf("%sYou are standing in an open terminal. An AI awaits your commands.%s\n\n", colorGray, colorReset)
-	fmt.Printf("ENTER to send • /help for commands • exit to quit\n")
-	fmt.Printf("                              %sCurrent folder:%s %s\n\n", colorGray, colorReset, currentDir)
-	fmt.Printf("%sAuto mode%s - AI can read/write files and run commands\n", colorYellow, colorReset)
+	fmt.Printf("\n%sYou are standing in an open terminal. An AI awaits your commands.%s\n", colorGray, colorReset)
+	fmt.Printf("\nENTER to send • \\ for newline • @file to include • /mode to switch\n")
+	printStatusBar()
 	fmt.Println()
 
 	history := []ChatMessage{
 		{Role: "system", Content: getSystemPrompt()},
 	}
+	
 	scanner := bufio.NewScanner(os.Stdin)
-	// Increase scanner buffer for large inputs
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	for {
-		fmt.Printf("%s> %s", colorYellow, colorReset)
-		if !scanner.Scan() {
-			break
-		}
+	placeholders := []string{
+		"Try: \"What files are in this folder?\"",
+		"Try: \"Read package.json and explain it\"",
+		"Try: \"Find all .go files\"",
+		"Try: \"Show folder structure\"",
+	}
+	phIdx := 0
 
-		input := strings.TrimSpace(scanner.Text())
+	for {
+		fmt.Printf("%s> %s%s%s ", colorYellow, colorGray, placeholders[phIdx%len(placeholders)], colorReset)
+		fmt.Printf("\r%s> %s", colorYellow, colorReset)
+		
+		input := readMultiLineInput(scanner)
+		input = strings.TrimSpace(input)
+		
 		if input == "" {
 			continue
 		}
+		
+		phIdx++
 
-		// Exit commands
+		// Exit
 		if input == "exit" || input == "quit" || input == "/exit" {
 			fmt.Printf("%sBye!%s\n", colorCyan, colorReset)
 			break
 		}
 
-		// Handle slash commands
+		// Mode switch
+		if input == "/mode" {
+			cycleMode()
+			fmt.Printf("Mode: %s\n\n", getModeDisplay())
+			history[0] = ChatMessage{Role: "system", Content: getSystemPrompt()}
+			continue
+		}
+
+		// Slash commands
 		if strings.HasPrefix(input, "/") {
 			result := handleCommand(input, scanner)
 			if result != "" {
 				fmt.Println(result)
-				// Add command result to context for AI
-				if !strings.HasPrefix(input, "/help") && !strings.HasPrefix(input, "/clear") {
-					history = append(history, ChatMessage{
-						Role:    "user",
-						Content: fmt.Sprintf("[User executed: %s]\n%s", input, result),
-					})
-				}
 			}
 			fmt.Println()
 			continue
 		}
+
+		// Process @mentions
+		input = processAtMentions(input)
 
 		// Send to AI
 		history = append(history, ChatMessage{Role: "user", Content: input})
@@ -735,32 +745,32 @@ func runChat(args []string) {
 		fmt.Printf("%s", colorReset)
 		
 		if err != nil {
-			fmt.Printf("\n%sError: %s%s\n", colorRed, err, colorReset)
+			fmt.Printf("\n%sError: %s%s\n\n", colorRed, err, colorReset)
 			history = history[:len(history)-1]
 			continue
 		}
 		
-		// Check for tool calls in response
+		// Handle tool calls
 		_, toolResults := parseAndExecuteTools(response)
 		
 		if len(toolResults) > 0 {
-			// Show tool execution
-			fmt.Printf("\n\n%s--- Executing tools ---%s\n", colorCyan, colorReset)
-			for _, result := range toolResults {
-				fmt.Printf("%s%s%s\n", colorGray, result, colorReset)
+			fmt.Printf("\n\n%s--- Executing ---%s\n", colorCyan, colorReset)
+			for _, r := range toolResults {
+				fmt.Printf("%s%s%s\n", colorGray, r, colorReset)
 			}
-			fmt.Printf("%s-----------------------%s\n\n", colorCyan, colorReset)
+			fmt.Printf("%s-----------------%s\n", colorCyan, colorReset)
 			
-			// Add tool results to history and get AI explanation
 			history = append(history, ChatMessage{Role: "assistant", Content: response})
-			toolContext := "Tool results:\n" + strings.Join(toolResults, "\n\n")
-			history = append(history, ChatMessage{Role: "user", Content: toolContext + "\n\nBerdasarkan hasil di atas, jelaskan ke user dengan ringkas."})
 			
-			fmt.Printf("%s", colorGreen)
-			followUp, err := sendMessageStream(apiKey, history)
+			// Get AI explanation
+			toolContext := "Results:\n" + strings.Join(toolResults, "\n\n")
+			history = append(history, ChatMessage{Role: "user", Content: toolContext + "\n\nJelaskan singkat ke user."})
+			
+			fmt.Printf("\n%s", colorGreen)
+			followUp, _ := sendMessageStream(apiKey, history)
 			fmt.Printf("%s", colorReset)
 			
-			if err == nil {
+			if followUp != "" {
 				history = append(history, ChatMessage{Role: "assistant", Content: followUp})
 			}
 		} else {
@@ -782,36 +792,46 @@ func handleCommand(input string, scanner *bufio.Scanner) string {
 	switch cmd {
 	case "/help":
 		return `Commands:
-  /read <file>   - Baca file
-  /ls [dir]      - List direktori
-  /edit <file>   - Edit file
-  /run <cmd>     - Jalankan command
-  /cd <dir>      - Pindah direktori
-  /pwd           - Direktori saat ini
-  /clear         - Hapus history
-  exit           - Keluar`
+  /read <file>  - Read file
+  /ls [dir]     - List directory
+  /run <cmd>    - Run command
+  /find <name>  - Find files
+  /grep <p>:<f> - Search in files
+  /tree [dir]   - Show structure
+  /edit <file>  - Edit file
+  /cd <dir>     - Change directory
+  /pwd          - Current directory
+  /mode         - Cycle mode (auto/ask/manual)
+  /clear        - Clear history
+  exit          - Quit`
 	case "/read", "/cat":
 		return cmdRead(arg)
 	case "/ls", "/dir":
 		return cmdList(arg)
-	case "/run", "/exec", "/$":
+	case "/run", "/exec":
 		return cmdRun(arg)
+	case "/find":
+		return cmdFind(arg)
+	case "/grep":
+		return cmdGrep(arg)
+	case "/tree":
+		return cmdTree(arg)
 	case "/cd":
 		return cmdCd(arg)
 	case "/pwd":
-		return fmt.Sprintf("Current directory: %s", currentDir)
-	case "/edit", "/nano", "/vi":
+		return fmt.Sprintf("Directory: %s", currentDir)
+	case "/edit":
 		return cmdEdit(arg, scanner)
 	case "/clear":
 		return "History cleared"
 	default:
-		return fmt.Sprintf("Unknown command: %s (type /help)", cmd)
+		return fmt.Sprintf("Unknown: %s (try /help)", cmd)
 	}
 }
 
 func sendMessageStream(apiKey string, messages []ChatMessage) (string, error) {
 	reqBody := ChatRequest{
-		Model:     "MiniMax-Text-01",
+		Model:     modelName,
 		MaxTokens: 4096,
 		Messages:  messages,
 		Stream:    true,
