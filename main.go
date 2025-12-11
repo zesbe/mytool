@@ -31,7 +31,7 @@ const (
 	colorGray   = "\033[90m"
 )
 
-const claudeAPIURL = "https://api.anthropic.com/v1/messages"
+const minimaxAPIURL = "https://api.minimax.io/v1/chat/completions"
 
 func main() {
 	args := os.Args[1:]
@@ -88,15 +88,15 @@ func printHelp() {
 	fmt.Println("  time          Display current time in multiple formats")
 	fmt.Println("  env           List environment variables")
 	fmt.Println("  disk          Show disk usage")
-	fmt.Println("  chat [msg]    Chat with Claude AI")
+	fmt.Println("  chat [msg]    Chat with Minimax AI")
 	fmt.Println("  help          Show this help message")
 	fmt.Println()
 	fmt.Printf("%sChat Examples:%s\n", colorYellow, colorReset)
 	fmt.Println("  mytool chat                     # Interactive mode")
-	fmt.Println("  mytool chat \"Hello, Claude!\"    # Single message")
+	fmt.Println("  mytool chat \"Hello!\"            # Single message")
 	fmt.Println()
 	fmt.Printf("%sEnvironment:%s\n", colorYellow, colorReset)
-	fmt.Println("  ANTHROPIC_API_KEY    Required for chat command")
+	fmt.Println("  MINIMAX_API_KEY    Required for chat command")
 	fmt.Println()
 }
 
@@ -237,7 +237,7 @@ func printDisk() {
 	fmt.Println()
 }
 
-// ==================== CLAUDE CHAT ====================
+// ==================== MINIMAX CHAT ====================
 
 type ChatMessage struct {
 	Role    string `json:"role"`
@@ -246,34 +246,33 @@ type ChatMessage struct {
 
 type ChatRequest struct {
 	Model     string        `json:"model"`
-	MaxTokens int           `json:"max_tokens"`
+	MaxTokens int           `json:"max_tokens,omitempty"`
 	Messages  []ChatMessage `json:"messages"`
 }
 
-type ContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+type ChatChoice struct {
+	Message ChatMessage `json:"message"`
 }
 
 type ChatResponse struct {
-	Content []ContentBlock `json:"content"`
+	Choices []ChatChoice `json:"choices"`
 	Error   *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
 }
 
 func runChat(args []string) {
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	apiKey := os.Getenv("MINIMAX_API_KEY")
 	if apiKey == "" {
-		fmt.Printf("%sError: ANTHROPIC_API_KEY environment variable not set%s\n", colorRed, colorReset)
+		fmt.Printf("%sError: MINIMAX_API_KEY environment variable not set%s\n", colorRed, colorReset)
 		fmt.Println()
 		fmt.Println("To get an API key:")
-		fmt.Println("  1. Go to https://console.anthropic.com/")
+		fmt.Println("  1. Go to https://platform.minimax.io/")
 		fmt.Println("  2. Create an account or sign in")
 		fmt.Println("  3. Go to API Keys and create a new key")
 		fmt.Println()
 		fmt.Println("Then set the key:")
-		fmt.Printf("  export ANTHROPIC_API_KEY=\"your-api-key\"\n")
+		fmt.Printf("  export MINIMAX_API_KEY=\"your-api-key\"\n")
 		fmt.Println()
 		os.Exit(1)
 	}
@@ -293,7 +292,7 @@ func runChat(args []string) {
 	// Interactive mode
 	fmt.Println()
 	fmt.Printf("%s╔═══════════════════════════════════════╗%s\n", colorCyan, colorReset)
-	fmt.Printf("%s║         Claude AI Chat                ║%s\n", colorCyan, colorReset)
+	fmt.Printf("%s║         Minimax AI Chat               ║%s\n", colorCyan, colorReset)
 	fmt.Printf("%s╚═══════════════════════════════════════╝%s\n", colorCyan, colorReset)
 	fmt.Printf("%sType 'exit' or 'quit' to end the conversation%s\n", colorGray, colorReset)
 	fmt.Println()
@@ -335,7 +334,7 @@ func runChat(args []string) {
 
 		history = append(history, ChatMessage{Role: "user", Content: input})
 
-		fmt.Printf("%sClaude: %s", colorCyan, colorReset)
+		fmt.Printf("%sAI: %s", colorCyan, colorReset)
 		response, err := sendMessage(apiKey, history)
 		if err != nil {
 			fmt.Printf("%sError: %s%s\n", colorRed, err, colorReset)
@@ -351,7 +350,7 @@ func runChat(args []string) {
 
 func sendMessage(apiKey string, messages []ChatMessage) (string, error) {
 	reqBody := ChatRequest{
-		Model:     "claude-sonnet-4-20250514",
+		Model:     "MiniMax-Text-01",
 		MaxTokens: 4096,
 		Messages:  messages,
 	}
@@ -361,14 +360,13 @@ func sendMessage(apiKey string, messages []ChatMessage) (string, error) {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", claudeAPIURL, bytes.NewBuffer(jsonBody))
+	req, err := http.NewRequest("POST", minimaxAPIURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(req)
@@ -383,10 +381,6 @@ func sendMessage(apiKey string, messages []ChatMessage) (string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp ChatResponse
-		if json.Unmarshal(body, &errResp) == nil && errResp.Error != nil {
-			return "", fmt.Errorf("API error: %s", errResp.Error.Message)
-		}
 		return "", fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -395,17 +389,13 @@ func sendMessage(apiKey string, messages []ChatMessage) (string, error) {
 		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	if len(chatResp.Content) == 0 {
+	if chatResp.Error != nil {
+		return "", fmt.Errorf("API error: %s", chatResp.Error.Message)
+	}
+
+	if len(chatResp.Choices) == 0 {
 		return "", fmt.Errorf("empty response from API")
 	}
 
-	// Combine all text content blocks
-	var result strings.Builder
-	for _, block := range chatResp.Content {
-		if block.Type == "text" {
-			result.WriteString(block.Text)
-		}
-	}
-
-	return result.String(), nil
+	return chatResp.Choices[0].Message.Content, nil
 }
